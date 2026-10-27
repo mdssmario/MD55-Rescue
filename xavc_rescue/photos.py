@@ -177,7 +177,6 @@ def _mpf_extent(read, app2_data_off, length):
 def jpeg_extent(read, limit, scan_chunk=1 << 20):
     pos = 2
     mpf_end = 0
-    make = b''
     while pos + 4 <= limit:
         m = read(pos, 4)
         if len(m) < 4 or m[0] != 0xFF:
@@ -192,10 +191,6 @@ def jpeg_extent(read, limit, scan_chunk=1 << 20):
             break
         if length < 2:
             return None
-        if marker == 0xE1 and not make:
-            seg = read(pos + 4, min(length, 512))
-            i = seg.find(b'SONY')
-            make = b'SONY' if i >= 0 else b'?'
         if marker == 0xE2:
             mpf_end = max(mpf_end, _mpf_extent(read, pos + 4, length - 2))
         pos += 2 + length
@@ -208,9 +203,8 @@ def jpeg_extent(read, limit, scan_chunk=1 << 20):
             break
         i = chunk.find(b'\xff\xd9')
         if i >= 0:
+            # sin relleno: las miniaturas JPEG de Sony terminan justo en EOI (comprobado en tarjeta)
             end = max(pos + i + 2, mpf_end if mpf_end <= limit else 0)
-            if make == b'SONY':
-                end = _pad_zeros(read, end, limit)
             return end, True, 'foto JPEG', 'JPG'
         pos += len(chunk) - 1
         if pos > MAX_JPEG:

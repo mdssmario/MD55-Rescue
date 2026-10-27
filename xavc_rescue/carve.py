@@ -179,12 +179,14 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def load_targets(folder):
-    """Clips de una carpeta a localizar en la tarjeta: {tamaño: [(nombre, sha256)]}."""
+def load_targets(folder, kinds=('video', 'foto')):
+    """Archivos de una carpeta a localizar en la tarjeta: {tamaño: [(nombre, sha256)]}.
+    Solo los de los tipos que se buscan (si se buscan fotos, los vídeos no cuentan)."""
+    exts = (('.MP4', '.MXF') if 'video' in kinds else ()) + (PHOTO_EXTS if 'foto' in kinds else ())
     targets = {}
     for name in sorted(os.listdir(folder)):
         path = os.path.join(folder, name)
-        if os.path.isfile(path) and name.upper().endswith(('.MP4', '.MXF') + PHOTO_EXTS):
+        if os.path.isfile(path) and exts and name.upper().endswith(exts):
             targets.setdefault(os.path.getsize(path), []).append((name, _sha256(path)))
     return targets
 
@@ -270,11 +272,11 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
         raise ValueError('La carpeta de salida no puede estar en la misma unidad que se rescata: '
                          'escribir ahí podría sobrescribir los vídeos borrados.')
     os.makedirs(out_dir, exist_ok=True)
-    targets = load_targets(compare_dir) if compare_dir else None
+    targets = load_targets(compare_dir, kinds) if compare_dir else None
     wanted = sum(len(v) for v in targets.values()) if targets else 0
     matched = {}
     if targets:
-        log('Clips a localizar: %d (de %s)' % (wanted, compare_dir))
+        log('Archivos a localizar: %d (de %s)' % (wanted, compare_dir))
     src = Source(source)
     results = []
 
