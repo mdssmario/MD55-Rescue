@@ -128,6 +128,7 @@ class Job(QObject):
     log = Signal(str)
     progress = Signal(float)
     clip = Signal(dict)
+    result = Signal(dict)
     finished = Signal(bool, str)
 
     def __init__(self, args, elevate=False, parent=None):
@@ -160,6 +161,8 @@ class Job(QObject):
                 self.progress.emit(ev['p'])
             elif t == 'clip':
                 self.clip.emit(ev)
+            elif t == 'result':
+                self.result.emit(ev.get('data') or {})
             elif t == 'done':
                 self._finish(ev.get('ok', False), ev.get('msg', ''))
                 return
@@ -779,6 +782,215 @@ class AnalyzePage(QWidget):
         self.thread.start()
 
 
+class CardToolsPage(QWidget):
+    """Información, salud, pruebas y reparación de la tarjeta."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('page')
+        self.job = None
+        self.card = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(32, 26, 32, 22)
+        lay.addWidget(page_header('Herramientas de tarjeta',
+                                  'Comprueba si una tarjeta es fiable (falsa, sectores dañados, velocidad '
+                                  'real), su vida útil si la informa, y repara el formato o la partición.'))
+        top = QHBoxLayout()
+        top.addWidget(step_label('Tarjeta'))
+        top.addStretch(1)
+        refresh = QPushButton('Actualizar')
+        refresh.clicked.connect(self.refresh)
+        top.addWidget(refresh)
+        lay.addLayout(top)
+        self.drives = QListWidget()
+        self.drives.setObjectName('drives')
+        self.drives.setMaximumHeight(130)
+        self.drives.itemSelectionChanged.connect(self._selected_changed)
+        lay.addWidget(self.drives)
+
+        self.info = QLabel('Elige una tarjeta para ver su información.')
+        self.info.setObjectName('hint')
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.RichText)
+        frame = QFrame()
+        frame.setObjectName('card')
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(14, 10, 14, 10)
+        fl.addWidget(self.info)
+        lay.addWidget(frame)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        self.buttons = []
+
+        def add(row, col, text, tip, handler, danger=False):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            if danger:
+                b.setObjectName('danger')
+            b.clicked.connect(handler)
+            grid.addWidget(b, row, col)
+            self.buttons.append(b)
+            return b
+
+        grid.addWidget(step_label('Diagnóstico · no borra nada'), 0, 0, 1, 2)
+        add(1, 0, 'Información y vida útil', 'Modelo, particiones, formato y contadores de desgaste',
+            self.do_info)
+        add(1, 1, 'Prueba de lectura completa', 'Lee toda la tarjeta: sectores ilegibles y zonas lentas',
+            self.do_surface)
+        grid.addWidget(step_label('Prueba de escritura · usa el espacio libre'), 2, 0, 1, 2)
+        add(3, 0, 'Capacidad y velocidad real', 'Detecta tarjetas falsas, datos corruptos y la clase '
+            'de velocidad que cumple de verdad', self.do_capacity)
+        grid.addWidget(step_label('Reparación'), 4, 0, 1, 2)
+        add(5, 0, 'Reparar sistema de archivos', 'chkdsk / diskutil: corrige errores sin borrar',
+            self.do_fsrepair)
+        add(5, 1, 'Formatear y rehacer partición', 'BORRA TODO y deja la tarjeta como nueva '
+            '(alineación y formato SD)', self.do_format, danger=True)
+        lay.addLayout(grid)
+        lay.addWidget(hint('Solo se muestran unidades extraíbles (tarjetas y lectores). Si la tarjeta '
+                           'tiene material por recuperar, rescátalo ANTES: la prueba de capacidad y el '
+                           'formateo sobrescriben lo borrado.'))
+
+        self.status = QLabel('')
+        self.status.setObjectName('step')
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        row = QHBoxLayout()
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        row.addWidget(self.bar, 1)
+        self.stop_btn = QPushButton('Detener')
+        self.stop_btn.setObjectName('danger')
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(lambda: self.job and self.job.stop())
+        row.addWidget(self.stop_btn)
+        lay.addLayout(row)
+        self.log = LogPanel()
+        lay.addWidget(self.log)
+        lay.addStretch(1)
+        self.refresh()
+
+    # ---- selección
+    def refresh(self):
+        self.drives.clear()
+        for d in devices.list_drives():
+            if d['system'] or not d['removable']:
+                continue        # solo tarjetas y lectores: nunca discos ni SSD externos
+            it = QListWidgetItem('%s   %s   ·   %s   ·   %s' % (
+                d['id'], d['name'], d['fs'] or '—', human_size(d['size']) if d['size'] else '—'))
+            it.setData(Qt.UserRole, d)
+            self.drives.addItem(it)
+        self._selected_changed()
+
+    def _sel(self):
+        it = self.drives.currentItem()
+        return it.data(Qt.UserRole) if it else None
+
+    def _selected_changed(self):
+        busy = bool(self.job and not self.job.done)
+        for b in self.buttons:
+            b.setEnabled(bool(self._sel()) and not busy)
+        if self._sel() and not busy:
+            self.do_info()
+
+    # ---- acciones
+    def _run(self, args, title, elevate=False):
+        if self.job and not self.job.done:
+            return
+        self.log.clear()
+        self.bar.setValue(0)
+        self.status.setText(title + ('  —  esperando permiso de Administrador…'
+                                     if elevate and not devices.is_admin() else '…'))
+        for b in self.buttons:
+            b.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.job = Job(args, elevate, self)
+        self.job.log.connect(self.log.append)
+        self.job.progress.connect(lambda p: self.bar.setValue(int(p * 1000)))
+        self.job.result.connect(self._on_result)
+        self.job.finished.connect(self._on_finished)
+        self.current = title
+        try:
+            self.job.start()
+        except PermissionError as e:
+            self._on_finished(False, str(e))
+
+    def do_info(self):
+        self._run(['tarjeta', self._sel()['id']], 'Leyendo información')
+
+    def do_surface(self):
+        self._run(['probar-lectura', self._sel()['id']], 'Prueba de lectura completa', elevate=True)
+
+    def do_capacity(self):
+        d = self._sel()
+        r = QMessageBox.question(
+            self, 'Prueba de capacidad',
+            'Se llenará el espacio libre de %s con datos de prueba y se verificarán (se borran al '
+            'terminar). Los archivos actuales no se tocan, pero lo BORRADO que aún pudiera '
+            'recuperarse se perderá.\n\n¿Continuar?' % d['id'])
+        if r == QMessageBox.Yes:
+            self._run(['probar-capacidad', d['id']], 'Prueba de capacidad y velocidad')
+
+    def do_fsrepair(self):
+        self._run(['reparar-fs', self._sel()['id']], 'Reparando sistema de archivos', elevate=True)
+
+    def do_format(self):
+        from PySide6.QtWidgets import QInputDialog
+        d = self._sel()
+        text, ok = QInputDialog.getText(
+            self, 'Formatear y rehacer partición',
+            'Esto BORRA TODO lo que hay en %s (%s, %s) y no se puede deshacer.\n'
+            'Escribe %s para confirmar:' % (d['id'], d['name'], human_size(d['size'] or 0), d['id']))
+        if ok and text.strip().upper().rstrip('\\') == d['id'].upper().rstrip('\\'):
+            self._run(['formatear', d['id'], '--confirmar', text.strip()], 'Formateando', elevate=True)
+        elif ok:
+            QMessageBox.information(self, 'Formatear', 'La confirmación no coincide: no se ha borrado nada.')
+
+    # ---- resultados
+    def _on_result(self, data):
+        if 'tarjeta' in data:
+            c, h = data['tarjeta'], data['salud']
+            parts = ', '.join('%s a %s MB' % (p.get('letter') or p.get('n'),
+                                               (p.get('offset') or 0) // 1048576)
+                              for p in c.get('partitions', []))
+            used = (c['volsize'] or 0) - (c['free'] or 0) if c.get('volsize') else None
+            self.info.setText(
+                '<b style="color:#fff">%s</b> · %s · %s<br>%s · %s %s · particiones: %s<br>'
+                'Ocupado: %s de %s<br><b>Vida útil:</b> %s' % (
+                    c['id'], c['model'], human_size(c['size'] or 0), c.get('bus') or '',
+                    c.get('style') or '', c.get('fs') or '', parts or '—',
+                    human_size(used) if used is not None else '—',
+                    human_size(c['volsize']) if c.get('volsize') else '—', h['conclusion']))
+        elif 'veredicto' in data:
+            v = data['veredicto']
+            text = {'correcta': 'Tarjeta correcta', 'falsa': 'TARJETA FALSA',
+                    'errores': 'Tarjeta con DATOS CORRUPTOS', 'incompleta': 'Prueba incompleta'}[v]
+            self.result_text = '%s · escritura %.0f MB/s (mín. %.0f) · lectura %.0f MB/s · clase real: %s' % (
+                text, data['escritura_media'], data['escritura_minima'], data['lectura_media'],
+                data.get('clase') or 'ninguna')
+        elif 'zonas_ilegibles' in data:
+            bad = data['zonas_ilegibles']
+            self.result_text = ('%d zonas ilegibles (%s) · ' % (len(bad), human_size(data['bytes_ilegibles']))
+                                if bad else 'Sin sectores dañados · ') + \
+                'lectura media %.0f MB/s' % data.get('lectura_media', 0)
+        elif 'fs' in data:
+            self.result_text = 'Formateada en %s (clúster %s). Formatéala también en la cámara.' % (
+                data['fs'], data['cluster'])
+
+    def _on_finished(self, ok, msg):
+        self.stop_btn.setEnabled(False)
+        for b in self.buttons:
+            b.setEnabled(bool(self._sel()))
+        summary = getattr(self, 'result_text', None)
+        self.result_text = None
+        if ok:
+            self.bar.setValue(1000)
+            self.status.setText('%s: %s' % (self.current, summary) if summary else self.current + ': hecho.')
+        else:
+            self.status.setText('%s: no se pudo completar. %s' % (self.current, msg))
+
+
 class AboutPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -836,7 +1048,8 @@ class MainWindow(QMainWindow):
         sl.addLayout(brand)
         self.nav = QListWidget()
         self.nav.setObjectName('nav')
-        for name in ('Rescatar tarjeta', 'Reparar clip', 'Analizar clip', 'Acerca de'):
+        for name in ('Rescatar tarjeta', 'Reparar clip', 'Analizar clip', 'Herramientas de tarjeta',
+                     'Acerca de'):
             self.nav.addItem(name)
         sl.addWidget(self.nav, 1)
         adm = QLabel('  Permisos: Administrador' if devices.is_admin() else
@@ -845,7 +1058,7 @@ class MainWindow(QMainWindow):
         adm.setStyleSheet('padding-left: 14px;')
         sl.addWidget(adm)
         self.pages = QStackedWidget()
-        for p in (RescuePage(), RepairPage(), AnalyzePage(), AboutPage()):
+        for p in (RescuePage(), RepairPage(), AnalyzePage(), CardToolsPage(), AboutPage()):
             self.pages.addWidget(p)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.nav.setCurrentRow(0)

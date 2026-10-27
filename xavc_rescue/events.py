@@ -29,6 +29,9 @@ class EventFile:
     def clip(self, info):
         self._write(dict(info, t='clip'))
 
+    def result(self, info):
+        self._write({'t': 'result', 'data': info})
+
     def stop_requested(self):
         return os.path.exists(self.stop_path)
 

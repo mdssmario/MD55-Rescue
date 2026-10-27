@@ -30,6 +30,18 @@ Pantallas:
 - **Reparar clip**: añade los clips que no abren y una carpeta con clips sanos; elige sola la
   referencia compatible (Intra / Long GOP, resolución, bitrate).
 - **Analizar clip**: arrastra un clip y muestra su diagnóstico.
+- **Herramientas de tarjeta** (solo unidades extraíbles; nunca el disco del sistema ni SSD/discos externos):
+
+  | Herramienta | Qué hace | ¿Borra? |
+  |---|---|---|
+  | Información y vida útil | Modelo, particiones, formato, ocupación y contadores de desgaste si la tarjeta o el lector los informan (CFexpress/NVMe suele hacerlo; SD por USB casi nunca) | No |
+  | Prueba de lectura completa | Lee toda la tarjeta: sectores ilegibles, zonas lentas, velocidad | No |
+  | Capacidad y velocidad real | Como H2testw/F3: llena el espacio libre con datos verificables, los relee **sin caché** y detecta tarjetas falsas, datos corruptos y la clase de velocidad que cumple de verdad (V30/V60/V90) | Sobrescribe lo borrado; los archivos actuales no se tocan |
+  | Reparar sistema de archivos | `chkdsk /f` en Windows, `diskutil repairVolume` en Mac | No |
+  | Formatear y rehacer partición | MBR nuevo, partición alineada a 4 MB, FAT32 (≤ 32 GB, clúster 32 KB) o exFAT (clúster 128/256 KB), como pide la SD Association. Hay que escribir la letra para confirmar | **Sí, todo** |
+
+  Si la tarjeta tiene material por recuperar, rescátalo antes de probarla o formatearla.
+  Después de formatear con el ordenador, formatea también en la cámara.
 
 En macOS la tarjeta se lee como `/dev/diskN` (el programa la lista sola); en Windows por su
 letra (`E:`).
