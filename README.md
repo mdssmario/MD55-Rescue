@@ -1,8 +1,11 @@
 # MD55 Rescue
 
-Recuperación de vídeo de cámaras Sony: XAVC S, XAVC HS, XAVC S-I y XAVC en MXF.
-Conserva el flujo original sin recodificar, así que el material en S-Log3, S-Cinetone,
-HLG, 10 bits 4:2:2, etc. sale exactamente como lo grabó la cámara.
+Recuperación de vídeo y fotos de cámaras Sony:
+
+- **Vídeo**: XAVC S, XAVC HS, XAVC S-I y XAVC en MXF. Conserva el flujo original sin
+  recodificar, así que el material en S-Log3, S-Cinetone, HLG, 10 bits 4:2:2, etc. sale
+  exactamente como lo grabó la cámara.
+- **Fotos**: RAW (ARW de Sony, DNG, TIFF), HEIF (`.HIF` de Sony, `.HEIC`) y JPG.
 
 Funciona en **Windows y macOS**. ffmpeg es opcional: sirve para verificar el resultado y
 para re-empaquetar MXF.
@@ -19,10 +22,11 @@ todas formas»); en Mac, la primera vez clic derecho → Abrir.
 
 Pantallas:
 
-- **Rescatar tarjeta**: elige la tarjeta (o una imagen `.img`) y la carpeta de destino. Al
-  leer la tarjeta pide permiso de Administrador (UAC en Windows, contraseña en Mac). Los clips
-  aparecen en una tabla a medida que se recuperan, con duración, códec, perfil (S-Log3,
-  S-Cinetone…) y fecha. «Detener» funciona en cualquier momento.
+- **Rescatar tarjeta**: elige la tarjeta (o una imagen `.img`), qué buscar (vídeo, fotos o
+  ambos) y la carpeta de destino. Al leer la tarjeta pide permiso de Administrador (UAC en
+  Windows, contraseña en Mac). Lo recuperado aparece en una tabla a medida que se encuentra,
+  con duración, códec, perfil (S-Log3, S-Cinetone…), cámara y fecha. «Detener» funciona en
+  cualquier momento.
 - **Reparar clip**: añade los clips que no abren y una carpeta con clips sanos; elige sola la
   referencia compatible (Intra / Long GOP, resolución, bitrate).
 - **Analizar clip**: arrastra un clip y muestra su diagnóstico.
@@ -115,6 +119,18 @@ Clips reales de una **ILCE-9M3** en S-Log3 / S-Gamut3.Cine, 59.94p, cortados art
 
 Y una imagen de tarjeta simulada: el clip completo se recuperó byte a byte y el cortado se reparó.
 Se pierde como mucho el último bloque (< 1 s) si quedó a medias.
+
+Fotos de la misma **ILCE-9M3** (RAW + HEIF, ARW comprimido, sin comprimir y sin pérdida) y
+JPEG de prueba, mezcladas con vídeo en una tarjeta simulada: **las 22 fotos y el vídeo se
+recuperaron idénticos byte a byte**. Cómo se sabe dónde acaba cada foto:
+
+| Formato | Final del archivo |
+|---|---|
+| ARW / DNG / TIFF | Lo más lejano que referencian sus directorios TIFF (datos RAW, vista previa JPEG, tablas de Sony) + relleno de ceros hasta 4 KB en las Sony |
+| HIF / HEIC | La cadena de cajas ISO `ftyp → meta → free → mdat` |
+| JPG | Marcadores hasta el fin de imagen, más las imágenes extra declaradas en MPF (Sony añade una vista previa grande) |
+
+Pendiente de probar en una tarjeta real formateada con fotos, y JPG hechos por la cámara.
 
 ## Tarjetas formateadas: cómo las deja la cámara
 

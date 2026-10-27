@@ -12,7 +12,11 @@ import re
 import struct
 import sys
 
-from . import mp4, mxf, sonycard
+from . import mp4, mxf, photos, sonycard
+
+PHOTO_KINDS = ('raw', 'heif', 'jpg')
+LONE_HEADER = 1 << 20       # un "clip" de este tamaño o menos es solo una cabecera, sin vídeo
+PHOTO_EXTS = ('.ARW', '.DNG', '.TIF', '.HIF', '.HEIC', '.AVIF', '.JPG', '.JPEG')
 
 SECTOR = 512
 BLOCK = 8 << 20
@@ -97,9 +101,25 @@ def _block_hits(data, pos):
         start = pos + i - 4
         if start >= 0 and start % SECTOR == 0 and 4 <= i < BLOCK + 4:
             size = struct.unpack('>I', data[i - 4:i])[0]
-            if 12 <= size <= 512 and data[i + 4:i + 8] in KNOWN_BRANDS:
-                hits.append((start, 'mp4', data[i + 4:i + 8].decode('latin1')))
+            brand = data[i + 4:i + 8]
+            if 12 <= size <= 512 and brand in KNOWN_BRANDS:
+                hits.append((start, 'mp4', brand.decode('latin1')))
+            elif 12 <= size <= 512 and brand in photos.HEIF_BRANDS:
+                hits.append((start, 'heif', brand.decode('latin1')))
         i = data.find(b'ftyp', i + 1)
+    for sig in (b'II*\0', b'MM\0*'):            # RAW (ARW, DNG...) y TIFF
+        i = data.find(sig)
+        while i >= 0:
+            start = pos + i
+            if start % SECTOR == 0 and i < BLOCK and photos.is_tiff_start(data, i):
+                hits.append((start, 'raw', ''))
+            i = data.find(sig, i + 1)
+    i = data.find(b'\xff\xd8\xff')
+    while i >= 0:
+        start = pos + i
+        if start % SECTOR == 0 and i < BLOCK and photos.is_jpeg_start(data, i):
+            hits.append((start, 'jpg', ''))
+        i = data.find(b'\xff\xd8\xff', i + 1)
     i = data.find(mxf.PP_PREFIX)
     while i >= 0:
         start = pos + i
@@ -164,7 +184,7 @@ def load_targets(folder):
     targets = {}
     for name in sorted(os.listdir(folder)):
         path = os.path.join(folder, name)
-        if os.path.isfile(path) and name.upper().endswith(('.MP4', '.MXF')):
+        if os.path.isfile(path) and name.upper().endswith(('.MP4', '.MXF') + PHOTO_EXTS):
             targets.setdefault(os.path.getsize(path), []).append((name, _sha256(path)))
     return targets
 
@@ -239,10 +259,13 @@ def _same_device(source, out_dir):
 
 
 def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir=None,
-          on_clip=None, should_stop=None, start=0, end=None):
-    """Busca y extrae clips. Con compare_dir se detiene en cuanto encuentra todos los clips
-    de esa carpeta y comprueba que los recuperados son idénticos byte a byte.
-    on_clip(dict) se llama con cada clip guardado; should_stop() permite cancelar."""
+          on_clip=None, should_stop=None, start=0, end=None, kinds=('video', 'foto')):
+    """Busca y extrae clips de vídeo y fotos (kinds: 'video', 'foto').
+    Con compare_dir se detiene en cuanto encuentra todos los archivos de esa carpeta y
+    comprueba que los recuperados son idénticos byte a byte.
+    on_clip(dict) se llama con cada archivo guardado; should_stop() permite cancelar."""
+    want_video = 'video' in kinds
+    want_photo = 'foto' in kinds
     if _same_device(source, out_dir):
         raise ValueError('La carpeta de salida no puede estar en la misma unidad que se rescata: '
                          'escribir ahí podría sobrescribir los vídeos borrados.')
@@ -255,8 +278,8 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
     src = Source(source)
     results = []
 
-    def new_name(kind, start, suffix=''):
-        ext = kind.upper()
+    def new_name(kind, start, suffix='', ext=None):
+        ext = (ext or kind).upper()
         return '%s_%04d_%012X%s.%s' % (ext, len(results) + 1, start, suffix, ext)
 
     def report(out, name, kind, start, size, complete, note, brand):
@@ -276,10 +299,11 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
         results.append(result)
         if on_clip and kind != 'xml':
             from . import clipinfo
-            on_clip(dict(result, **clipinfo.summary(out)))
+            info = photos.summary(out) if kind in PHOTO_KINDS else clipinfo.summary(out)
+            on_clip(dict(result, **info))
 
-    def save(start, end, kind, complete, note, brand):
-        name = new_name(kind, start, '' if complete else '_INCOMPLETO')
+    def save(start, end, kind, complete, note, brand, ext=None):
+        name = new_name(kind, start, '' if complete else '_INCOMPLETO', ext)
         out = os.path.join(out_dir, name)
         with open(out, 'wb') as o:
             pos = start
@@ -313,15 +337,32 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
     orphans = []        # índices (moov) sueltos aún sin pareja
     try:
         log('Origen: %s (%.2f GB)' % (src.label, src.size / 1e9))
-        log('Buscando clips de vídeo Sony...')
+        log('Buscando %s...' % ' y '.join(
+            t for t, on in (('clips de vídeo', want_video), ('fotos', want_photo)) if on))
         scanner = SignatureScanner(src, progress, should_stop, start, end)
         if start or end:
             log('Zona: de %.1f GB a %.1f GB' % (scanner.begin / 1e9, scanner.end / 1e9))
         covered_until = -1
         for start, kind, brand in scanner:
             if start < covered_until:
-                continue        # firma falsa dentro de un clip ya recuperado
-            if kind == 'xml':
+                continue        # firma falsa dentro de un clip o foto ya recuperados
+            if kind in PHOTO_KINDS:
+                for clip in waiting:
+                    if clip['limit'] is None:
+                        clip['limit'] = start
+                if not want_photo:
+                    continue
+                r = photos.extent(kind, src, start, src.size)
+                if r is None:
+                    continue    # firma suelta (p.ej. un Exif dentro de otro archivo)
+                end, complete, note, ext = r
+                save(start, end, kind, complete, note, brand, ext)
+                if complete:
+                    covered_until = end
+                    scanner.skip_to(end)
+            elif not want_video:
+                continue
+            elif kind == 'xml':
                 if targets:
                     continue
                 data = src.read(start, 65536)
@@ -331,7 +372,7 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
                     e += 2 if data[e:e + 2] == b'\r\n' else 1 if data[e:e + 1] == b'\n' else 0
                     save(start, start + e, 'xml', True, 'metadatos', '')
                 continue
-            if kind == 'moov':
+            elif kind == 'moov':
                 om = sonycard.read_orphan_moov(src, start)
                 if om is None:
                     continue
@@ -374,6 +415,10 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
                     continue
                 limit = clip['limit'] or min(clip['start'] + MAX_INCOMPLETE, src.size)
                 end, complete, note = extent(clip['kind'], clip['start'], limit)
+                if end - clip['start'] <= LONE_HEADER:
+                    # la A9 III deja copias de cabecera sueltas (sin vídeo) junto a cada índice
+                    log('  cabecera sin datos en 0x%X: descartada' % clip['start'])
+                    continue
                 save(clip['start'], end, clip['kind'], complete, note, clip['brand'])
     finally:
         src.close()
@@ -403,8 +448,9 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
                 except repair.RepairError as e:
                     log('  no se pudo reparar: %s' % e)
     log('')
-    log('Listo: %d clips completos, %d incompletos, %d XML de metadatos.' % (
-        sum(1 for r in results if r['complete'] and r['kind'] != 'xml'),
+    log('Listo: %d clips de vídeo, %d fotos, %d incompletos, %d XML de metadatos.' % (
+        sum(1 for r in results if r['complete'] and r['kind'] in ('mp4', 'mxf')),
+        sum(1 for r in results if r['complete'] and r['kind'] in PHOTO_KINDS),
         sum(1 for r in results if not r['complete']),
         sum(1 for r in results if r['kind'] == 'xml')))
     return results

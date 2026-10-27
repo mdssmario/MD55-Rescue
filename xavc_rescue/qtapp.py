@@ -348,8 +348,8 @@ class RescuePage(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(page_header('Rescatar clips de una tarjeta',
-                                  'Recupera vídeos borrados o perdidos tras formatear la tarjeta. '
+        lay.addWidget(page_header('Rescatar vídeos y fotos de una tarjeta',
+                                  'Recupera vídeos y fotos borrados o perdidos tras formatear la tarjeta. '
                                   'Solo se lee la tarjeta: nunca se escribe en ella.'))
         top = QHBoxLayout()
         top.addWidget(step_label('1. Elige la tarjeta'))
@@ -369,7 +369,18 @@ class RescuePage(QWidget):
         lay.addWidget(hint('Conecta la tarjeta con un lector o la cámara en modo USB «Mass Storage». '
                            'Si el sistema ofrece formatearla, pulsa Cancelar.'))
 
-        lay.addWidget(step_label('2. Dónde guardar los clips recuperados'))
+        lay.addWidget(step_label('2. Qué buscar'))
+        kinds = QHBoxLayout()
+        self.want_video = QCheckBox('Vídeo (XAVC S / HS / S-I, MXF)')
+        self.want_photo = QCheckBox('Fotos (RAW ARW, HEIF, JPG)')
+        for cb in (self.want_video, self.want_photo):
+            cb.setChecked(True)
+            cb.toggled.connect(self._validate)
+            kinds.addWidget(cb)
+        kinds.addStretch(1)
+        lay.addLayout(kinds)
+
+        lay.addWidget(step_label('3. Dónde guardar lo recuperado'))
         self.out = PathRow('Carpeta en otro disco')
         self.out.setText(default_output())
         self.out.edit.textChanged.connect(self._validate)
@@ -444,14 +455,15 @@ class RescuePage(QWidget):
         return it.data(Qt.UserRole) if it else None
 
     def _validate(self):
-        self.go.setEnabled(bool(self._selected()) and bool(self.out.text()))
+        self.go.setEnabled(bool(self._selected()) and bool(self.out.text())
+                           and (self.want_video.isChecked() or self.want_photo.isChecked()))
 
     # ---- paso 2: búsqueda y resultados
     def _run_view(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.run_title = QLabel('Buscando clips…')
+        self.run_title = QLabel('Buscando…')
         self.run_title.setObjectName('title')
         self.run_sub = QLabel('')
         self.run_sub.setObjectName('subtitle')
@@ -498,14 +510,16 @@ class RescuePage(QWidget):
             args += ['--referencia', self.ref.text()]
         if self.cmp.text():
             args += ['--comparar', self.cmp.text()]
+        args += ['--tipos', ','.join(t for t, cb in (('video', self.want_video), ('foto', self.want_photo))
+                                     if cb.isChecked())]
         elevate = devices.is_device(d['id'])
         self.source_size = d.get('size') or 0
         self.table.setRowCount(0)
         self.log.clear()
-        self.found = 0
+        self.found = self.videos = self.photos = 0
         self.bar.setValue(0)
-        self.run_title.setText('Buscando clips en %s' % (d['id'] if not d.get('image')
-                                                        else os.path.basename(d['id'])))
+        self.run_title.setText('Buscando en %s' % (d['id'] if not d.get('image')
+                                                  else os.path.basename(d['id'])))
         self.run_sub.setText('Esperando permiso de Administrador…' if elevate and not devices.is_admin()
                              else 'Leyendo…')
         self.stats.setText('')
@@ -547,11 +561,18 @@ class RescuePage(QWidget):
             if el > 3 and p > 0.002:
                 parts.append('%s/s' % human_size(self.source_size * p / el))
                 parts.append('quedan ~%s' % human_time(el / p * (1 - p)))
-        parts.append('%d clips recuperados' % self.found)
+        parts.append(self._counts())
         self.stats.setText('   ·   '.join(parts))
+
+    def _counts(self):
+        return '%d vídeos · %d fotos recuperados' % (self.videos, self.photos)
 
     def _on_clip(self, ev):
         self.found += 1
+        if ev.get('kind') in ('raw', 'heif', 'jpg'):
+            self.photos += 1
+        else:
+            self.videos += 1
         add_clip_row(self.table, ev)
 
     def _on_finished(self, ok, msg):
@@ -559,8 +580,8 @@ class RescuePage(QWidget):
         self.new_btn.setVisible(True)
         if ok:
             self.bar.setValue(1000)
-            self.run_title.setText('Terminado: %d clips recuperados' % self.found)
-            self.run_sub.setText('Doble clic en un clip para abrirlo. Los archivos están en %s' % self.out_dir)
+            self.run_title.setText('Terminado: ' + self._counts())
+            self.run_sub.setText('Doble clic en un archivo para abrirlo. Están en %s' % self.out_dir)
         else:
             self.run_title.setText('No se pudo completar')
             self.run_sub.setText(msg)

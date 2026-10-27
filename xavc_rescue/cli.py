@@ -46,6 +46,8 @@ def main(argv=None):
                    help='parar al encontrar los clips de esta carpeta y comprobar que son idénticos')
     c.add_argument('--desde', type=float, default=0, metavar='GB', help='empezar en este punto (GB)')
     c.add_argument('--hasta', type=float, metavar='GB', help='terminar en este punto (GB)')
+    c.add_argument('--tipos', default='video,foto',
+                   help='qué buscar: video, foto o video,foto (por defecto, ambos)')
 
     i = sub.add_parser('imagen', help='copiar la tarjeta a un archivo .img')
     i.add_argument('origen')
@@ -85,7 +87,8 @@ def main(argv=None):
             carve.carve(args.origen, args.salida, log=log, progress=progress,
                         reference=args.referencia, compare_dir=args.comparar,
                         on_clip=on_clip, should_stop=should_stop,
-                        start=int(args.desde * 1e9), end=int(args.hasta * 1e9) if args.hasta else None)
+                        start=int(args.desde * 1e9), end=int(args.hasta * 1e9) if args.hasta else None,
+                        kinds=tuple(t.strip() for t in args.tipos.split(',')))
         elif args.cmd == 'imagen':
             carve.make_image(args.origen, args.destino, log=log, progress=progress,
                              should_stop=should_stop)
