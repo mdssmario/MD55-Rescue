@@ -795,6 +795,14 @@ class CardToolsPage(QWidget):
         lay.addWidget(page_header('Herramientas de tarjeta',
                                   'Comprueba si una tarjeta es fiable (falsa, sectores dañados, velocidad '
                                   'real), su vida útil si la informa, y repara el formato o la partición.'))
+        warn = QLabel('⚠  AVISO: la prueba de capacidad, la reparación del sistema de archivos y el '
+                      'formateo escriben en la tarjeta. Después de usarlas, RECUPERAR los vídeos y fotos '
+                      'borrados de esa tarjeta se vuelve IMPOSIBLE. Si hay algo que rescatar, usa antes '
+                      '«Rescatar tarjeta».')
+        warn.setWordWrap(True)
+        warn.setStyleSheet('background: #3a1d20; border: 1px solid #8a3a40; border-radius: 8px; '
+                           'color: #ffb4b4; padding: 10px 12px; font-weight: 600;')
+        lay.addWidget(warn)
         top = QHBoxLayout()
         top.addWidget(step_label('Tarjeta'))
         top.addStretch(1)
@@ -922,28 +930,50 @@ class CardToolsPage(QWidget):
     def do_surface(self):
         self._run(['probar-lectura', self._sel()['id']], 'Prueba de lectura completa', elevate=True)
 
+    def _disclaimer(self, title, what):
+        """Aviso que hay que aceptar marcando la casilla. True si el usuario acepta."""
+        d = self._sel()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText('<b>%s escribe en %s (%s, %s).</b>' % (what, d['id'], d['name'],
+                                                         human_size(d['size'] or 0)))
+        box.setInformativeText(
+            'Después de usar esta herramienta, la RECUPERACIÓN de los vídeos y fotos borrados de esta '
+            'tarjeta será IMPOSIBLE, también con otros programas.\n\n'
+            'Si la tarjeta tiene algo que quieras rescatar, cancela y usa primero «Rescatar tarjeta».')
+        check = QCheckBox('Entiendo que después no se podrá recuperar nada borrado de esta tarjeta')
+        box.setCheckBox(check)
+        go = box.addButton('Continuar', QMessageBox.AcceptRole)
+        box.addButton('Cancelar', QMessageBox.RejectRole)
+        go.setEnabled(False)
+        check.toggled.connect(go.setEnabled)
+        box.exec()
+        return box.clickedButton() is go and check.isChecked()
+
     def do_capacity(self):
         d = self._sel()
-        r = QMessageBox.question(
-            self, 'Prueba de capacidad',
-            'Se llenará el espacio libre de %s con datos de prueba y se verificarán (se borran al '
-            'terminar). Los archivos actuales no se tocan, pero lo BORRADO que aún pudiera '
-            'recuperarse se perderá.\n\n¿Continuar?' % d['id'])
-        if r == QMessageBox.Yes:
-            self._run(['probar-capacidad', d['id']], 'Prueba de capacidad y velocidad')
+        if self._disclaimer('Prueba de capacidad y velocidad',
+                            'La prueba llena todo el espacio libre con datos de prueba y'):
+            self._run(['probar-capacidad', d['id'], '--acepto'], 'Prueba de capacidad y velocidad')
 
     def do_fsrepair(self):
-        self._run(['reparar-fs', self._sel()['id']], 'Reparando sistema de archivos', elevate=True)
+        if self._disclaimer('Reparar sistema de archivos', 'La reparación modifica la estructura y'):
+            self._run(['reparar-fs', self._sel()['id'], '--acepto'], 'Reparando sistema de archivos',
+                      elevate=True)
 
     def do_format(self):
         from PySide6.QtWidgets import QInputDialog
         d = self._sel()
+        if not self._disclaimer('Formatear y rehacer partición', 'El formateo BORRA TODO y'):
+            return
         text, ok = QInputDialog.getText(
             self, 'Formatear y rehacer partición',
             'Esto BORRA TODO lo que hay en %s (%s, %s) y no se puede deshacer.\n'
             'Escribe %s para confirmar:' % (d['id'], d['name'], human_size(d['size'] or 0), d['id']))
         if ok and text.strip().upper().rstrip('\\') == d['id'].upper().rstrip('\\'):
-            self._run(['formatear', d['id'], '--confirmar', text.strip()], 'Formateando', elevate=True)
+            self._run(['formatear', d['id'], '--confirmar', text.strip(), '--acepto'], 'Formateando',
+                      elevate=True)
         elif ok:
             QMessageBox.information(self, 'Formatear', 'La confirmación no coincide: no se ha borrado nada.')
 

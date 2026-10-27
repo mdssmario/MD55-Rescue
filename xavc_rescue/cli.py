@@ -10,9 +10,11 @@
 Herramientas de tarjeta:
   xavc_rescue tarjeta H:                     información y salud
   xavc_rescue probar-lectura H:              lee toda la tarjeta (no escribe)
-  xavc_rescue probar-capacidad H:            llena el espacio libre y lo verifica
-  xavc_rescue reparar-fs H:                  chkdsk / diskutil repairVolume
-  xavc_rescue formatear H: --confirmar H:    BORRA TODO y formatea al estilo SD
+  xavc_rescue probar-capacidad H: --acepto   llena el espacio libre y lo verifica
+  xavc_rescue reparar-fs H: --acepto         chkdsk / diskutil repairVolume
+  xavc_rescue formatear H: --confirmar H: --acepto   BORRA TODO y formatea al estilo SD
+
+Las tres últimas hacen IMPOSIBLE recuperar después lo borrado de esa tarjeta.
 
 Con --eventos ARCHIVO el progreso se escribe como líneas JSON (lo usa la interfaz).
 """
@@ -30,6 +32,10 @@ def _bar(p):
         sys.stdout.write('\n')
 
 
+DISCLAIMER = ('AVISO: esta herramienta escribe en la tarjeta. Después, la RECUPERACIÓN de los vídeos y '
+              'fotos borrados de esa tarjeta será IMPOSIBLE. Si hay algo que rescatar, usa antes «rescatar».')
+
+
 def _card_command(args, log, progress, should_stop, on_result):
     if args.cmd == 'probar-capacidad' and args.carpeta:
         res = cardtools.capacity_test(args.origen, log, progress, should_stop,
@@ -37,6 +43,10 @@ def _card_command(args, log, progress, should_stop, on_result):
         on_result(res)
         return
     card = cardtools.info(args.origen)
+    if args.cmd in ('probar-capacidad', 'reparar-fs', 'formatear'):
+        log(DISCLAIMER)
+        if not args.acepto:
+            raise cardtools.CardError('No se ha hecho nada: añade --acepto para confirmar que lo entiendes.')
     log('%s · %s · %.1f GB · %s %s' % (card['id'], card['model'], card['size'] / cardtools.GB,
                                        card.get('style') or '', card.get('fs') or ''))
     if args.cmd == 'tarjeta':
@@ -114,6 +124,8 @@ def main(argv=None):
     fm.add_argument('--etiqueta', default='MD55')
     fm.add_argument('--simular', action='store_true', help='mostrar los pasos sin ejecutar nada')
     for p in (pc, rf, fm):
+        p.add_argument('--acepto', action='store_true',
+                       help='acepto que después ya no se podrá recuperar lo borrado de la tarjeta')
         p.add_argument('--no-extraible', action='store_true',
                        help='permitir un lector que el sistema no marca como extraíble')
     fm.add_argument('--permitir-virtual', action='store_true', help=argparse.SUPPRESS)

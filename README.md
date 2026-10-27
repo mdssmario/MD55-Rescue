@@ -40,7 +40,10 @@ Pantallas:
   | Reparar sistema de archivos | `chkdsk /f` en Windows, `diskutil repairVolume` en Mac | No |
   | Formatear y rehacer partición | MBR nuevo, partición alineada a 4 MB, FAT32 (≤ 32 GB, clúster 32 KB) o exFAT (clúster 128/256 KB), como pide la SD Association. Hay que escribir la letra para confirmar | **Sí, todo** |
 
-  Si la tarjeta tiene material por recuperar, rescátalo antes de probarla o formatearla.
+  **Aviso:** la prueba de capacidad, la reparación y el formateo escriben en la tarjeta; después,
+  recuperar lo borrado de esa tarjeta es **imposible** (también con otros programas). La interfaz
+  muestra el aviso siempre y pide marcar «Entiendo…» antes de cada una; en consola hace falta
+  `--acepto`. Si hay algo que rescatar, rescátalo antes.
   Después de formatear con el ordenador, formatea también en la cámara.
 
 En macOS la tarjeta se lee como `/dev/diskN` (el programa la lista sola); en Windows por su
