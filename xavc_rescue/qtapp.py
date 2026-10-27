@@ -3,8 +3,8 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QObject, QPoint, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QPolygon
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -82,23 +82,41 @@ def open_path(path):
     QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
-def app_icon():
-    pm = QPixmap(256, 256)
+def asset(name):
+    """Ruta de un recurso, tanto desde el código como dentro del .exe / .app."""
+    base = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, 'assets', name)
+
+
+def logo_pixmap(height, color=ACCENT):
+    """Logo MD55 teñido de un color, a la altura indicada (en píxeles)."""
+    src = QPixmap(asset('logo.png'))
+    if src.isNull():
+        return QPixmap()
+    src = src.scaledToHeight(height, Qt.SmoothTransformation)
+    pm = QPixmap(src.size())
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.drawPixmap(0, 0, src)
+    p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    p.fillRect(pm.rect(), QColor(color))
+    p.end()
+    return pm
+
+
+def app_icon(size=256):
+    pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor('#1d2027'))
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.setBrush(QColor('#15171c'))
     p.setPen(Qt.NoPen)
-    p.drawRoundedRect(8, 8, 240, 240, 48, 48)
-    p.setBrush(QColor(ACCENT))
-    p.drawRoundedRect(48, 84, 116, 88, 14, 14)
-    p.drawPolygon(QPolygon([QPoint(168, 112), QPoint(212, 88), QPoint(212, 168), QPoint(168, 144)]))
-    p.setPen(QColor('#1d2027'))
-    f = QFont()
-    f.setBold(True)
-    f.setPixelSize(34)
-    p.setFont(f)
-    p.drawText(48, 84, 116, 88, Qt.AlignCenter, 'MD55')
+    m = size // 32
+    p.drawRoundedRect(m, m, size - 2 * m, size - 2 * m, size * 0.2, size * 0.2)
+    logo = logo_pixmap(int(size * 0.68))
+    if not logo.isNull():
+        p.drawPixmap((size - logo.width()) // 2, (size - logo.height()) // 2, logo)
     p.end()
     return QIcon(pm)
 
@@ -746,6 +764,9 @@ class AboutPage(QWidget):
         self.setObjectName('page')
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 26, 32, 22)
+        mark = QLabel()
+        mark.setPixmap(logo_pixmap(96))
+        lay.addWidget(mark)
         lay.addWidget(page_header('MD55 Rescue %s' % __version__,
                                   'Recuperación de vídeo para cámaras Sony: XAVC S, XAVC HS, XAVC S-I '
                                   'y XAVC en MXF. Copia los datos originales sin recodificar.'))
@@ -781,9 +802,17 @@ class MainWindow(QMainWindow):
         side.setStyleSheet('background: #101216;')
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 22, 0, 16)
-        brand = QLabel('  MD55 Rescue')
-        brand.setStyleSheet('font-size: 18px; font-weight: 700; color: %s; padding-left: 14px;' % ACCENT)
-        sl.addWidget(brand)
+        brand = QHBoxLayout()
+        brand.setContentsMargins(22, 0, 12, 10)
+        brand.setSpacing(10)
+        mark = QLabel()
+        mark.setPixmap(logo_pixmap(34))
+        name = QLabel('MD55 Rescue')
+        name.setStyleSheet('font-size: 18px; font-weight: 700; color: #ffffff;')
+        brand.addWidget(mark)
+        brand.addWidget(name)
+        brand.addStretch(1)
+        sl.addLayout(brand)
         self.nav = QListWidget()
         self.nav.setObjectName('nav')
         for name in ('Rescatar tarjeta', 'Reparar clip', 'Analizar clip', 'Acerca de'):
