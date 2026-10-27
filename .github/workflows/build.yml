@@ -1,0 +1,42 @@
+# Compila MD55 Rescue para Windows y macOS (Apple Silicon e Intel) en cada push o a mano.
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: MD55-Rescue-windows
+          - os: macos-14
+            artifact: MD55-Rescue-mac-arm64
+          - os: macos-13
+            artifact: MD55-Rescue-mac-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencias
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Iconos
+        run: python tools/make_icons.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Compilar
+        run: pyinstaller --noconfirm MD55Rescue.spec
+      - name: DMG (macOS)
+        if: runner.os == 'macOS'
+        run: hdiutil create -volname "MD55 Rescue" -srcfolder "dist/MD55 Rescue.app" -ov -format UDZO "dist/${{ matrix.artifact }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/MD55 Rescue/
+            dist/*.dmg

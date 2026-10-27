@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Compilación (PyInstaller): se regenera con build_windows.bat / build_mac.sh
+build/
+dist/
+.venv-build/
+
+# Sistema
+.DS_Store
+Thumbs.db

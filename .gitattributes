@@ -1,0 +1,4 @@
+# Los scripts de macOS/Linux y el flujo de GitHub deben conservar finales de línea LF
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.bat  text eol=crlf
