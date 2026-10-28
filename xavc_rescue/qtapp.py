@@ -101,6 +101,7 @@ class Job(QObject):
     progress = Signal(float)
     clip = Signal(dict)
     result = Signal(dict)
+    event = Signal(dict)          # otros eventos: item, scan_done, phase…
     finished = Signal(bool, str)
 
     def __init__(self, args, elevate=False, parent=None):
@@ -122,8 +123,13 @@ class Job(QObject):
         if self.reader and not self.done:
             self.reader.request_stop()
 
-    def _poll(self):
-        for ev in self.reader.poll():
+    def send_selection(self, ids):
+        if self.reader and not self.done:
+            self.reader.send_selection(ids)
+
+    def _dispatch(self, events):
+        """Reparte los eventos leídos. True si ha llegado el final."""
+        for ev in events:
             t = ev.get('t')
             if t == 'log':
                 self.log.emit(ev['msg'])
@@ -135,12 +141,18 @@ class Job(QObject):
                 self.result.emit(ev.get('data') or {})
             elif t == 'done':
                 self._finish(ev.get('ok', False), ev.get('msg', ''))
-                return
+                return True
+            else:
+                self.event.emit(ev)
+        return False
+
+    def _poll(self):
+        if self._dispatch(self.reader.poll()):
+            return
         if self.proc is not None and self.proc.poll() is not None and not self.done:
-            for ev in self.reader.poll():           # el proceso terminó: ¿dejó su resultado?
-                if ev.get('t') == 'done':
-                    self._finish(ev.get('ok', False), ev.get('msg', ''))
-                    return
+            # el proceso terminó: atender todo lo que escribió antes de salir
+            if self._dispatch(self.reader.poll()):
+                return
             err = ''
             try:
                 with open(self.reader.path + '.err', encoding='utf-8', errors='replace') as f:
@@ -325,6 +337,7 @@ class RescuePage(QWidget):
         super().__init__(parent)
         self.setObjectName('page')
         self.job = None
+        self.mode = None
         self.stack = QStackedWidget()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -338,8 +351,8 @@ class RescuePage(QWidget):
     # ---- configuración
     def _setup_view(self, lay):
         lay.addWidget(page_header('Rescatar vídeos y fotos',
-                                  'Recupera lo borrado o perdido tras formatear la tarjeta. Solo se lee '
-                                  'la tarjeta: nunca se escribe en ella.'))
+                                  'Primero se explora la tarjeta y se muestra todo lo que se puede recuperar; '
+                                  'después eliges qué guardar. En la tarjeta nunca se escribe nada.'))
         head = QHBoxLayout()
         head.addWidget(section('1 · Tarjeta'))
         head.addStretch(1)
@@ -394,7 +407,7 @@ class RescuePage(QWidget):
         lay.addStretch(1)
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        self.go = QPushButton('Buscar')
+        self.go = QPushButton('Explorar tarjeta')
         self.go.setObjectName('primary')
         self.go.clicked.connect(self.start)
         bottom.addWidget(self.go)
@@ -417,7 +430,7 @@ class RescuePage(QWidget):
             self.go.setEnabled(bool(self.drives.selected()) and bool(self.out.text())
                                and (self.want_video.isChecked() or self.want_photo.isChecked()))
 
-    # ---- búsqueda y resultados
+    # ---- exploración, selección y recuperación
     def _run_view(self):
         w = QWidget()
         w.setObjectName('page')
@@ -426,7 +439,7 @@ class RescuePage(QWidget):
         lay.setSpacing(12)
         head = QHBoxLayout()
         titles = QVBoxLayout()
-        self.run_title = QLabel('Buscando…')
+        self.run_title = QLabel('Explorando…')
         self.run_title.setObjectName('title')
         self.run_sub = QLabel('')
         self.run_sub.setObjectName('subtitle')
@@ -434,22 +447,44 @@ class RescuePage(QWidget):
         titles.addWidget(self.run_title)
         titles.addWidget(self.run_sub)
         head.addLayout(titles, 1)
-        self.stop_btn = QPushButton('Detener')
+        self.stop_btn = QPushButton('Detener exploración')
         self.stop_btn.setObjectName('danger')
         self.stop_btn.clicked.connect(self.stop)
+        self.cancel_btn = QPushButton('Cancelar')
+        self.cancel_btn.clicked.connect(self.cancel)
         self.open_btn = QPushButton('Abrir carpeta')
         self.open_btn.clicked.connect(lambda: open_path(self.out_dir))
         self.new_btn = QPushButton('Nueva búsqueda')
         self.new_btn.setObjectName('primary')
         self.new_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        for b in (self.stop_btn, self.open_btn, self.new_btn):
+        for b in (self.stop_btn, self.cancel_btn, self.open_btn, self.new_btn):
             head.addWidget(b, 0, Qt.AlignTop)
         lay.addLayout(head)
         self.progress = ProgressPanel()
         lay.addWidget(self.progress)
 
-        body = QHBoxLayout()
-        body.setSpacing(12)
+        # filtros y selección
+        bar = QHBoxLayout()
+        bar.setSpacing(18)
+        self.f_video = QCheckBox('Vídeos')
+        self.f_photo = QCheckBox('Fotos')
+        self.f_incomplete = QCheckBox('Mostrar incompletos')
+        for cb in (self.f_video, self.f_photo, self.f_incomplete):
+            cb.setChecked(True)
+            cb.toggled.connect(self._apply_filter)
+            bar.addWidget(cb)
+        bar.addStretch(1)
+        self.sel_all = QPushButton('Seleccionar todo')
+        self.sel_all.clicked.connect(lambda: self._check_visible(True))
+        self.sel_none = QPushButton('Ninguno')
+        self.sel_none.clicked.connect(lambda: self._check_visible(False))
+        bar.addWidget(self.sel_all)
+        bar.addWidget(self.sel_none)
+        self.filter_bar = QWidget()
+        self.filter_bar.setLayout(bar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.filter_bar)
+
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.verticalHeader().setVisible(False)
@@ -465,15 +500,15 @@ class RescuePage(QWidget):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         h = self.table.horizontalHeader()
         h.setMinimumSectionSize(34)
-        for col, width in ((0, 34), (2, 70), (3, 200), (4, 160), (5, 80), (6, 150)):
+        for col, width in ((0, 62), (2, 70), (3, 200), (4, 160), (5, 80), (6, 160)):
             h.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, width)
         h.setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.cellDoubleClicked.connect(lambda r, _c: open_path(self.table.item(r, 1).data(Qt.UserRole)))
+        self.table.cellDoubleClicked.connect(self._open_row)
         self.table.itemSelectionChanged.connect(self._show_preview)
-        self.table.setToolTip('Doble clic para abrir')
-        body.addWidget(self.table, 1)
-        lay.addLayout(body, 1)
+        self.table.itemChanged.connect(self._selection_changed)
+        lay.addWidget(self.table, 1)
+
         # vista previa de la foto seleccionada, debajo de la tabla
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignCenter)
@@ -489,9 +524,31 @@ class RescuePage(QWidget):
         self.preview_card = card(prow, margins=(12, 12, 16, 12))
         self.preview_card.setVisible(False)
         lay.addWidget(self.preview_card)
+
+        foot = QHBoxLayout()
         self.log = LogPanel()
-        lay.addWidget(self.log)
+        foot.addWidget(self.log, 1, Qt.AlignTop)
+        self.sel_label = QLabel('')
+        self.sel_label.setObjectName('hint')
+        foot.addWidget(self.sel_label, 0, Qt.AlignTop)
+        self.recover_btn = QPushButton('Recuperar seleccionados')
+        self.recover_btn.setObjectName('primary')
+        self.recover_btn.clicked.connect(self.recover)
+        foot.addWidget(self.recover_btn, 0, Qt.AlignTop)
+        lay.addLayout(foot)
         return w
+
+    def _set_mode(self, mode):
+        """scan: explorando · choose: eligiendo · extract: recuperando · done: terminado."""
+        self.mode = mode
+        self.stop_btn.setVisible(mode == 'scan')
+        self.cancel_btn.setVisible(mode in ('scan', 'choose'))
+        self.open_btn.setVisible(mode in ('extract', 'done'))
+        self.new_btn.setVisible(mode == 'done')
+        self.filter_bar.setVisible(mode in ('scan', 'choose'))
+        self.recover_btn.setVisible(mode in ('scan', 'choose'))
+        self.sel_label.setVisible(mode in ('scan', 'choose'))
+        self._selection_changed()
 
     def start(self):
         d = self.drives.selected()
@@ -503,7 +560,8 @@ class RescuePage(QWidget):
         except OSError as e:
             QMessageBox.warning(self, 'Carpeta de salida', str(e))
             return
-        args = ['rescatar', d['id'], '-o', self.out_dir]
+        self.preview_dir = os.path.join(worker.new_events_path() + '_previas')
+        args = ['explorar', d['id'], '-o', self.out_dir, '--previas', self.preview_dir]
         if self.ref.text():
             args += ['--referencia', self.ref.text()]
         if self.cmp.text():
@@ -512,24 +570,27 @@ class RescuePage(QWidget):
                                      if cb.isChecked())]
         elevate = devices.is_device(d['id'])
         self.source_size = d.get('size') or 0
+        self.table.blockSignals(True)
         self.table.setRowCount(0)
+        self.table.blockSignals(False)
+        self.rows = {}
         self.preview_card.setVisible(False)
         self.log.clear()
-        self.videos = self.photos = 0
         self.progress.setVisible(False)
-        name = d['id'] if not d.get('image') else os.path.basename(d['id'])
-        self.run_title.setText('Buscando en %s' % name)
+        self.found_v = self.found_p = 0
+        self.saved_v = self.saved_p = 0
+        self.source_name = d['id'] if not d.get('image') else os.path.basename(d['id'])
+        self.run_title.setText('Explorando %s' % self.source_name)
         self.run_sub.setText('Esperando permiso de Administrador…' if elevate and not devices.is_admin()
                              else 'Preparando…')
-        self.stop_btn.setVisible(True)
-        self.stop_btn.setEnabled(True)
-        self.new_btn.setVisible(False)
         self.stack.setCurrentIndex(1)
+        self._set_mode('scan')
         self.t0 = None
         self.job = Job(args, elevate, self)
         self.job.log.connect(self._on_log)
         self.job.progress.connect(self._on_progress)
-        self.job.clip.connect(self._on_clip)
+        self.job.event.connect(self._on_event)
+        self.job.clip.connect(self._on_saved)
         self.job.finished.connect(self._on_finished)
         try:
             self.job.start()
@@ -537,93 +598,215 @@ class RescuePage(QWidget):
             self._on_finished(False, str(e))
 
     def stop(self):
+        """Detiene la exploración: lo encontrado hasta ahora se puede recuperar."""
         if self.job:
             self.job.stop()
             self.stop_btn.setEnabled(False)
-            self.run_sub.setText('Deteniendo…')
+            self.run_sub.setText('Deteniendo la exploración…')
 
-    def _counts(self):
-        return '%d vídeo%s · %d foto%s' % (self.videos, '' if self.videos == 1 else 's',
-                                           self.photos, '' if self.photos == 1 else 's')
+    def cancel(self):
+        if self.job and self.job.running:
+            self.job.stop()
+        self.stack.setCurrentIndex(0)
 
     def _on_log(self, msg):
         if self.t0 is None:
             self.t0 = time.monotonic()
-            self.run_sub.setText('Leyendo la tarjeta. Puedes seguir usando el ordenador.')
+            if self.mode == 'scan':
+                self.run_sub.setText('Leyendo la tarjeta sin modificar nada. Puedes ir marcando lo que '
+                                     'quieras recuperar.')
         self.log.append(msg)
 
     def _on_progress(self, p):
         if self.t0 is None:
             self.t0 = time.monotonic()
         el = time.monotonic() - self.t0
+        total = self.source_size if self.mode == 'scan' else self.extract_bytes
         parts = ['%.0f %%' % (p * 100)]
-        if self.source_size:
-            parts.append('%s de %s' % (human_size(self.source_size * p), human_size(self.source_size)))
+        if total:
+            parts.append('%s de %s' % (human_size(total * p), human_size(total)))
             if el > 3 and 0.002 < p < 1:
-                parts.append('%s/s' % human_size(self.source_size * p / el))
+                parts.append('%s/s' % human_size(total * p / el))
                 parts.append('quedan ~%s' % human_time(el / p * (1 - p)))
-        parts.append(self._counts() + ' recuperados')
+        parts.append(self._found_text() if self.mode == 'scan' else
+                     '%d de %d recuperados' % (self.saved_v + self.saved_p, self.extract_count))
         self.progress.set(p, '   ·   '.join(parts))
 
-    def _on_clip(self, ev):
+    def _found_text(self):
+        return '%d vídeo%s · %d foto%s encontrados' % (
+            self.found_v, '' if self.found_v == 1 else 's', self.found_p, '' if self.found_p == 1 else 's')
+
+    # ---- eventos del motor
+    def _on_event(self, ev):
+        t = ev.get('t')
+        if t == 'item':
+            self._add_item(ev)
+        elif t == 'scan_done':
+            self.run_title.setText('Encontrados en %s: %s' % (self.source_name, self._found_text()
+                                                              .replace(' encontrados', '')))
+            self.run_sub.setText('Marca lo que quieras recuperar y pulsa «Recuperar seleccionados». '
+                                 'Todavía no se ha guardado nada.')
+            self.progress.set(1.0, '100 %   ·   ' + self._found_text())
+            self._set_mode('choose')
+        elif t == 'phase' and ev.get('phase') == 'extract':
+            self.t0 = time.monotonic()
+            self.progress.set(0.0, '')
+            self._set_mode('extract')
+
+    def _add_item(self, ev):
         photo = ev.get('kind') in PHOTO_KINDS
         if photo:
-            self.photos += 1
+            self.found_p += 1
         else:
-            self.videos += 1
-        if ev.get('identico_a'):
-            state, color = 'Idéntico a ' + ev['identico_a'], OK
-        elif ev.get('complete'):
-            state, color = 'Recuperado', OK
-        else:
-            state, color = 'Incompleto', WARN
+            self.found_v += 1
         r = self.table.rowCount()
+        self.table.blockSignals(True)
         self.table.insertRow(r)
-        kind = QTableWidgetItem()
-        kind.setIcon(QIcon(svg_pixmap('photo' if photo else 'video', ACCENT if photo else '#7aa7ff', 18)))
-        kind.setToolTip('Foto' if photo else 'Vídeo')
-        name = QTableWidgetItem(os.path.basename(ev.get('path', '')))
-        name.setData(Qt.UserRole, ev.get('path'))
-        name.setData(Qt.UserRole + 1, photo)
-        name.setToolTip('%s\n%s' % (ev.get('path'), ev.get('note', '')))
-        name.setData(Qt.UserRole + 2, ev)
-        cells = [kind, name, QTableWidgetItem(human_time(ev.get('duracion')) if not photo else '—'),
+        check = QTableWidgetItem()
+        check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+        check.setCheckState(Qt.Checked if ev.get('complete') else Qt.Unchecked)
+        check.setIcon(QIcon(svg_pixmap('photo' if photo else 'video', ACCENT if photo else '#7aa7ff', 18)))
+        check.setData(Qt.UserRole, ev)
+        name = QTableWidgetItem(ev.get('name', ''))
+        name.setToolTip(ev.get('note', ''))
+        cells = [check, name, QTableWidgetItem(human_time(ev.get('duracion')) if not photo else '—'),
                  QTableWidgetItem(ev.get('codec') or '—'), QTableWidgetItem(ev.get('perfil') or '—'),
-                 QTableWidgetItem(human_size(ev.get('size') or 0)), status_item(state, color)]
-        cells[-1].setToolTip(state)
+                 QTableWidgetItem(human_size(ev.get('size') or 0)),
+                 status_item('Encontrado' if ev.get('complete') else 'Incompleto',
+                             MUTED if ev.get('complete') else WARN)]
         for c, it in enumerate(cells):
             self.table.setItem(r, c, it)
-        self.table.scrollToBottom()
+        self.rows[ev['id']] = r
+        self._apply_filter_row(r)
+        self.table.blockSignals(False)
+        self._selection_changed()
+
+    def _apply_filter_row(self, r):
+        ev = self.table.item(r, 0).data(Qt.UserRole)
+        photo = ev.get('kind') in PHOTO_KINDS
+        hidden = ((photo and not self.f_photo.isChecked()) or (not photo and not self.f_video.isChecked())
+                  or (not ev.get('complete') and not self.f_incomplete.isChecked()))
+        self.table.setRowHidden(r, hidden)
+
+    def _apply_filter(self):
+        for r in range(self.table.rowCount()):
+            self._apply_filter_row(r)
+        self._selection_changed()
+
+    def _check_visible(self, on):
+        self.table.blockSignals(True)
+        for r in range(self.table.rowCount()):
+            if not self.table.isRowHidden(r):
+                self.table.item(r, 0).setCheckState(Qt.Checked if on else Qt.Unchecked)
+        self.table.blockSignals(False)
+        self._selection_changed()
+
+    def _chosen(self):
+        """Elementos marcados y visibles (lo oculto por un filtro no se recupera)."""
+        out = []
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it and it.checkState() == Qt.Checked and not self.table.isRowHidden(r):
+                out.append(it.data(Qt.UserRole))
+        return out
+
+    def _selection_changed(self, *_):
+        if not hasattr(self, 'recover_btn') or getattr(self, 'mode', None) not in ('scan', 'choose'):
+            return
+        chosen = self._chosen()
+        self.sel_label.setText('%d seleccionados · %s' % (len(chosen),
+                                                          human_size(sum(e.get('size') or 0 for e in chosen))))
+        self.recover_btn.setEnabled(self.mode == 'choose' and bool(chosen))
+        self.recover_btn.setToolTip('' if self.mode == 'choose' else
+                                    'Disponible al terminar la exploración (o pulsa «Detener exploración»).')
+
+    def recover(self):
+        chosen = self._chosen()
+        if not chosen or not self.job:
+            return
+        ids = {e['id'] for e in chosen}
+        self.extract_count = len(chosen)
+        self.extract_bytes = sum(e.get('size') or 0 for e in chosen)
+        self.table.blockSignals(True)
+        for item_id, r in self.rows.items():
+            it = self.table.item(r, 0)
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            if item_id in ids:
+                self.table.setItem(r, 6, status_item('Pendiente', MUTED))
+            else:
+                self.table.setItem(r, 6, status_item('Omitido', '#5f646d'))
+        self.table.blockSignals(False)
+        self.run_title.setText('Recuperando %d archivo%s' % (len(chosen), '' if len(chosen) == 1 else 's'))
+        self.run_sub.setText('Guardando en %s' % self.out_dir)
+        self.job.send_selection(sorted(ids))
+        self._set_mode('extract')
+
+    def _on_saved(self, ev):
+        r = self.rows.get(ev.get('id'))
+        if r is None:
+            return
+        if ev.get('kind') in PHOTO_KINDS:
+            self.saved_p += 1
+        else:
+            self.saved_v += 1
+        if ev.get('identico_a'):
+            state, color = 'Idéntico a ' + ev['identico_a'], OK
+        elif ev.get('note', '').startswith('reparado'):
+            state, color = 'Reparado', OK
+        else:
+            state, color = 'Recuperado' if ev.get('complete') else 'Guardado incompleto', \
+                OK if ev.get('complete') else WARN
+        it = self.table.item(r, 0)
+        data = dict(it.data(Qt.UserRole), path=ev.get('path'))
+        it.setData(Qt.UserRole, data)
+        self.table.item(r, 1).setText(os.path.basename(ev.get('path', '')))
+        self.table.item(r, 1).setToolTip(ev.get('path', ''))
+        self.table.setItem(r, 6, status_item(state, color))
+        rows = self.table.selectionModel().selectedRows()
+        if rows and rows[0].row() == r:
+            self._show_preview()
+
+    def _open_row(self, r, _c):
+        ev = self.table.item(r, 0).data(Qt.UserRole) or {}
+        if ev.get('path'):
+            open_path(ev['path'])
 
     def _show_preview(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        it = self.table.item(rows[0].row(), 1)
-        if not it.data(Qt.UserRole + 1):
+        ev = self.table.item(rows[0].row(), 0).data(Qt.UserRole) or {}
+        if ev.get('kind') not in PHOTO_KINDS:
             self.preview_card.setVisible(False)
             return
-        pm = uikit.preview_pixmap(it.data(Qt.UserRole), 240)
-        if pm is None:
+        pm = None
+        if ev.get('preview') and os.path.exists(ev['preview']):
+            pm = QPixmap(ev['preview'])
+            if not pm.isNull():
+                pm = pm.scaled(240, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if pm is None or pm.isNull():
             self.preview.setText('Sin vista previa')
         else:
             self.preview.setPixmap(pm)
-        ev = it.data(Qt.UserRole + 2) or {}
+        where = ev.get('path') or 'Aún no recuperada'
         self.preview_info.setText(
             '<span style="color:#fff;font-size:14px;font-weight:600">%s</span><br>'
-            '<span style="color:%s">%s · %s · %s</span><br><br>'
-            '<span style="color:%s">%s</span><br><span style="color:%s">Doble clic en la fila para abrirla.</span>'
-            % (os.path.basename(ev.get('path', '')), MUTED, ev.get('codec') or '—', ev.get('fecha') or '—',
-               human_size(ev.get('size') or 0), MUTED, ev.get('path', ''), MUTED))
+            '<span style="color:%s">%s · %s · %s</span><br><br><span style="color:%s">%s</span>'
+            % (os.path.basename(ev.get('path') or ev.get('name', '')), MUTED, ev.get('codec') or '—',
+               ev.get('fecha') or '—', human_size(ev.get('size') or 0), MUTED, where))
         self.preview_card.setVisible(True)
 
     def _on_finished(self, ok, msg):
-        self.stop_btn.setVisible(False)
-        self.new_btn.setVisible(True)
+        mode = getattr(self, 'mode', 'scan')
+        if mode in ('scan', 'choose') and ok:
+            self.stack.setCurrentIndex(0)       # cancelado antes de recuperar
+            return
+        self._set_mode('done')
         if ok:
-            self._on_progress(1.0)
-            self.run_title.setText('Terminado: ' + self._counts())
+            self.run_title.setText('Terminado: %d vídeo%s · %d foto%s recuperados' % (
+                self.saved_v, '' if self.saved_v == 1 else 's', self.saved_p, '' if self.saved_p == 1 else 's'))
             self.run_sub.setText('Doble clic en un archivo para abrirlo. Están en %s' % self.out_dir)
+            self.progress.set(1.0, '100 %')
         else:
             self.run_title.setText('No se pudo completar')
             self.run_sub.setText(msg)
@@ -1163,6 +1346,14 @@ class MainWindow(QMainWindow):
         lay.addWidget(side)
         lay.addWidget(self.pages, 1)
         self.setCentralWidget(central)
+
+    def closeEvent(self, e):
+        # que ningún proceso (p.ej. uno con permisos esperando la selección) quede en marcha
+        for i in range(self.pages.count()):
+            job = getattr(self.pages.widget(i), 'job', None)
+            if job is not None and job.running:
+                job.stop()
+        super().closeEvent(e)
 
 
 def main():

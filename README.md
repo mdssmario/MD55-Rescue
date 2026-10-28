@@ -22,11 +22,20 @@ todas formas»); en Mac, la primera vez clic derecho → Abrir.
 
 Pantallas:
 
-- **Rescatar tarjeta**: elige la tarjeta (o una imagen `.img`), qué buscar (vídeo, fotos o
-  ambos) y la carpeta de destino. Al leer la tarjeta pide permiso de Administrador (UAC en
-  Windows, contraseña en Mac). Lo recuperado aparece en una tabla a medida que se encuentra,
-  con duración, códec, perfil (S-Log3, S-Cinetone…), cámara y fecha. «Detener» funciona en
-  cualquier momento.
+- **Rescatar tarjeta**, en dos pasos:
+  1. **Explorar**: elige la tarjeta (o una imagen `.img`) y qué buscar (vídeo, fotos o ambos).
+     Se lee la tarjeta **sin guardar nada** y aparece la lista de lo que se puede recuperar,
+     con nombre según la fecha de la cámara, duración, formato, perfil (S-Log3, S-Cinetone…),
+     tamaño y vista previa de las fotos. «Detener exploración» deja elegir lo encontrado hasta
+     ese momento.
+  2. **Elegir y recuperar**: marca lo que quieras (filtros por vídeo/foto/incompletos,
+     «Seleccionar todo» / «Ninguno», total seleccionado) y pulsa «Recuperar seleccionados».
+     Solo se guarda eso. El permiso de Administrador se pide una sola vez: el proceso que lee
+     la tarjeta espera tu selección.
+
+  Desde consola: `python -m xavc_rescue explorar E: -o D:\Rescate` muestra la lista y pregunta
+  qué recuperar (`--seleccion todo` o `--seleccion 1,4,7` para no preguntar). `rescatar`
+  sigue recuperando todo sin preguntar.
 - **Reparar clip**: añade los clips que no abren y una carpeta con clips sanos; elige sola la
   referencia compatible (Intra / Long GOP, resolución, bitrate).
 - **Analizar clip**: arrastra un clip y muestra su diagnóstico.

@@ -74,6 +74,40 @@ def _card_command(args, log, progress, should_stop, on_result):
             on_result({'fs': fs, 'cluster': unit})
 
 
+def _explore_command(args, sink, log, progress, on_clip, should_stop):
+    """Explora sin escribir; con la interfaz espera su selección, en consola la pide."""
+    def console_selection(items):
+        media = [it for it in items if it['kind'] != 'xml']
+        if not media:
+            return None
+        print('\nEncontrados:')
+        for it in media:
+            print('  %4d  %-34s %9.1f MB  %s' % (it['id'], it['name'], it['size'] / 1048576,
+                                                it['info'].get('codec') or ''))
+        choice = args.seleccion
+        if choice == 'preguntar':
+            choice = input('\n¿Qué recupero? (todo / nada / ids separados por comas): ').strip()
+        if choice in ('', 'nada'):
+            return None
+        if choice == 'todo':
+            return [it['id'] for it in media]
+        return [int(x) for x in choice.replace(' ', '').split(',') if x.isdigit()]
+
+    def ui_selection(items):
+        sink.event('scan_done', count=len(items))
+        ids = sink.wait_selection()
+        if ids is not None:
+            sink.event('phase', phase='extract', count=len(ids))
+        return ids
+
+    carve.explore(args.origen, args.salida, ui_selection if sink else console_selection,
+                  log=log, progress=progress, should_stop=should_stop,
+                  on_item=(lambda d: sink.event('item', **d)) if sink else None, on_clip=on_clip,
+                  compare_dir=args.comparar, reference=args.referencia,
+                  start=int(args.desde * 1e9), end=int(args.hasta * 1e9) if args.hasta else None,
+                  kinds=tuple(t.strip() for t in args.tipos.split(',')), preview_dir=args.previas)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='xavc_rescue',
                                  description='Recuperación de vídeo de cámaras Sony (XAVC S/HS/S-I, MXF).')
@@ -99,6 +133,18 @@ def main(argv=None):
     c.add_argument('--hasta', type=float, metavar='GB', help='terminar en este punto (GB)')
     c.add_argument('--tipos', default='video,foto',
                    help='qué buscar: video, foto o video,foto (por defecto, ambos)')
+
+    ex = sub.add_parser('explorar', help='buscar sin guardar nada, elegir y recuperar lo elegido')
+    ex.add_argument('origen', help='E:, /dev/disk4 o archivo .img')
+    ex.add_argument('-o', '--salida', required=True)
+    ex.add_argument('--referencia', '-r', help='clip o carpeta de referencia para reparar incompletos')
+    ex.add_argument('--comparar', metavar='CARPETA', help='comprobar lo recuperado contra estos originales')
+    ex.add_argument('--desde', type=float, default=0, metavar='GB')
+    ex.add_argument('--hasta', type=float, metavar='GB')
+    ex.add_argument('--tipos', default='video,foto')
+    ex.add_argument('--seleccion', default='preguntar',
+                    help='en consola: «todo», «nada» o ids separados por comas (por defecto pregunta)')
+    ex.add_argument('--previas', help=argparse.SUPPRESS)
 
     i = sub.add_parser('imagen', help='copiar la tarjeta a un archivo .img')
     i.add_argument('origen')
@@ -130,7 +176,7 @@ def main(argv=None):
                        help='permitir un lector que el sistema no marca como extraíble')
     fm.add_argument('--permitir-virtual', action='store_true', help=argparse.SUPPRESS)
 
-    for p in (a, r, c, i, m, t, sl, pc, rf, fm):
+    for p in (a, r, c, ex, i, m, t, sl, pc, rf, fm):
         p.add_argument('--eventos', help=argparse.SUPPRESS)
 
     args = ap.parse_args(argv)
@@ -166,6 +212,8 @@ def main(argv=None):
                         on_clip=on_clip, should_stop=should_stop,
                         start=int(args.desde * 1e9), end=int(args.hasta * 1e9) if args.hasta else None,
                         kinds=tuple(t.strip() for t in args.tipos.split(',')))
+        elif args.cmd == 'explorar':
+            _explore_command(args, sink, log, progress, on_clip, should_stop)
         elif args.cmd == 'imagen':
             carve.make_image(args.origen, args.destino, log=log, progress=progress,
                              should_stop=should_stop)

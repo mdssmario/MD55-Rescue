@@ -266,20 +266,46 @@ def _exif_from(blob):
     return None, None
 
 
-def summary(path):
+def summary_blob(head, ext):
+    """Cámara, fecha y formato a partir del principio de la foto (leído de la tarjeta)."""
     info = {'camara': None, 'fecha': None, 'codec': None, 'perfil': None, 'duracion': None}
-    try:
-        with open(path, 'rb') as f:
-            head = f.read(256 * 1024)
-    except OSError:
-        return info
-    model, date = _exif_from(head)
+    model, date = _exif_from(head[:256 * 1024])
     info['camara'] = model
     if date:
         info['fecha'] = date[:16].replace(':', '-', 2)
-    ext = path.rsplit('.', 1)[-1].upper()
+    ext = ext.upper()
     info['codec'] = {'ARW': 'RAW ARW', 'DNG': 'RAW DNG', 'TIF': 'TIFF', 'HIF': 'HEIF',
                      'HEIC': 'HEIF', 'AVIF': 'AVIF', 'JPG': 'JPEG'}.get(ext, ext)
     if model:
         info['codec'] += ' · ' + model
     return info
+
+
+def summary(path):
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(256 * 1024)
+    except OSError:
+        head = b''
+    return summary_blob(head, path.rsplit('.', 1)[-1])
+
+
+def embedded_jpeg(data):
+    """La mayor JPEG completa dentro de unos bytes: la vista previa de un ARW, la miniatura
+    de un HIF o la miniatura Exif de un JPG (su imagen principal no cabe en lo leído)."""
+    best = None
+    i = data.find(b'\xff\xd8\xff')
+    tries = 0
+    while i >= 0 and tries < 24:
+        tries += 1
+        if is_jpeg_start(data, i):
+            def read(off, n, _i=i):
+                return data[_i + off:_i + off + n]
+            try:
+                r = jpeg_extent(read, len(data) - i, scan_chunk=len(data))
+            except (struct.error, ValueError):
+                r = None
+            if r and r[1] and (best is None or r[0] > best[1] - best[0]):
+                best = (i, i + r[0])
+        i = data.find(b'\xff\xd8\xff', i + 3)
+    return data[best[0]:best[1]] if best else None

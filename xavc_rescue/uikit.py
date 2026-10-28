@@ -116,6 +116,10 @@ QCheckBox { spacing: 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #4a505c; border-radius: 4px; background: #1b1e25; }
 QCheckBox::indicator:hover { border-color: %(accent)s; }
 QCheckBox::indicator:checked { background: %(accent)s; border-color: %(accent)s; image: url(%(check)s); }
+QTableView::indicator { width: 16px; height: 16px; border: 1px solid #4a505c; border-radius: 4px; background: #1b1e25; }
+QTableView::indicator:checked { background: %(accent)s; border-color: %(accent)s; image: url(%(check)s); }
+QTableView::indicator:disabled { border-color: #353a45; }
+QTableView::indicator:checked:disabled { background: #7a5a26; border-color: #7a5a26; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar::handle:vertical { background: #353a45; border-radius: 4px; min-height: 30px; }
 QScrollBar::handle:vertical:hover { background: #454b57; }

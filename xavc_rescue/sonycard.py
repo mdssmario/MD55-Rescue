@@ -199,7 +199,7 @@ def _header_fits(header, om):
 
 
 def final_header(src, start, mdat_off, om):
-    """Cabecera correcta del clip (ftyp/uuid/free hasta el mdat).
+    """Posición de la cabecera correcta del clip (ftyp/uuid/free hasta el mdat).
 
     La A9 III reescribe la cabecera definitiva de cada clip en el bloque que sigue a su
     índice; la que aparece delante de los datos suele ser de otro clip. Se elige la que
@@ -213,43 +213,58 @@ def final_header(src, start, mdat_off, om):
         if hdr and hdr[0] == mdat_off:
             after = src.read(after_pos, mdat_off)
     if after is not None and _header_fits(after, om):
-        return after, 'cabecera final tras el índice'
+        return after_pos, 'cabecera final tras el índice'
     if _header_fits(own, om) is False and after is not None and _header_fits(after, om) is not False:
-        return after, 'cabecera final tras el índice'
-    return own, 'cabecera inicial'
+        return after_pos, 'cabecera final tras el índice'
+    return start, 'cabecera inicial'
 
 
-def rebuild(src, start, mdat_off, mdat_hs, mdat_decl, shift, om, out_path, block=8 << 20):
-    """Escribe el clip original: cabecera + datos (saltando el hueco) + moov + meta.
+def plan(src, start, mdat_off, mdat_hs, mdat_decl, shift, om):
+    """Calcula cómo montar el clip original sin escribir nada todavía.
 
     Sony reserva el mdat en bloques de 64 MB y rellena con ceros lo que sobra; la cabecera
     que queda en la tarjeta puede declarar la reserva provisional (mayor), así que el tamaño
     se recalcula como el múltiplo de 64 MB que contiene los datos, que es el que deja la
-    cámara al cerrar el archivo. Se copian los datos hasta el último útil (según el índice)
-    y se repone el relleno de ceros.
+    cámara al cerrar el archivo.
     """
-    header, origin = final_header(src, start, mdat_off, om)
+    header_pos, origin = final_header(src, start, mdat_off, om)
     payload_needed = om.data_end - (mdat_off + mdat_hs)
-    if header[8:12] == b'XAVC':
+    if src.read(header_pos + 8, 4) == b'XAVC':
         size = -(-payload_needed // SONY_ALLOC) * SONY_ALLOC + mdat_hs
     else:
         size = mdat_decl if mdat_decl >= payload_needed + mdat_hs else payload_needed + mdat_hs
+    tail = len(om.moov_bytes) + len(om.tail_bytes)
+    return {'type': 'sony', 'header_pos': header_pos, 'mdat_off': mdat_off, 'hs': mdat_hs,
+            'mdat_size': size, 'data_from': start + mdat_off + mdat_hs + shift,
+            'data_end': start + om.data_end + shift, 'moov_pos': om.pos, 'moov_len': tail,
+            'out_size': mdat_off + size + tail, 'origin': origin}
+
+
+def write_plan(src, p, out_path, block=8 << 20, progress=None):
+    """Escribe el clip: cabecera + datos (saltando el hueco) + relleno + moov + meta."""
+    hs = p['hs']
     with open(out_path, 'wb') as o:
-        o.write(header + (struct.pack('>I4sQ', 1, b'mdat', size) if mdat_hs == 16
-                          else struct.pack('>I4s', size, b'mdat')))
-        pos = start + mdat_off + mdat_hs + shift
-        end = start + om.data_end + shift
+        o.write(src.read(p['header_pos'], p['mdat_off']))
+        o.write(struct.pack('>I4sQ', 1, b'mdat', p['mdat_size']) if hs == 16
+                else struct.pack('>I4s', p['mdat_size'], b'mdat'))
+        pos, end = p['data_from'], p['data_end']
         while pos < end:
             chunk = src.read(pos, min(block, end - pos))
             if not chunk:
                 break
             o.write(chunk)
             pos += len(chunk)
-        pad = mdat_off + size - o.tell()
+            if progress:
+                progress(len(chunk))
+        pad = p['mdat_off'] + p['mdat_size'] - o.tell()
         while pad > 0:
             n = min(pad, block)
             o.write(b'\0' * n)
             pad -= n
-        o.write(om.moov_bytes)
-        o.write(om.tail_bytes)
-    return size, origin
+        o.write(src.read(p['moov_pos'], p['moov_len']))
+    return p['mdat_size'], p['origin']
+
+
+def rebuild(src, start, mdat_off, mdat_hs, mdat_decl, shift, om, out_path, block=8 << 20):
+    """Monta y escribe el clip original de una vez."""
+    return write_plan(src, plan(src, start, mdat_off, mdat_hs, mdat_decl, shift, om), out_path, block)

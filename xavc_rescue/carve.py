@@ -12,7 +12,7 @@ import re
 import struct
 import sys
 
-from . import mp4, mxf, photos, sonycard
+from . import clipinfo, mp4, mxf, photos, sonycard
 
 PHOTO_KINDS = ('raw', 'heif', 'jpg')
 LONE_HEADER = 1 << 20       # un "clip" de este tamaño o menos es solo una cabecera, sin vídeo
@@ -248,23 +248,6 @@ def mxf_extent(src, start, limit):
     return limit, False, 'MXF sin cerrar (grabación interrumpida)'
 
 
-def _friendly_name(path, name, fecha, number):
-    """Renombra con la fecha de la cámara: 2026-10-27_16-42_0002.ARW (si se conoce)."""
-    m = re.match(r'(\d{4})[-:](\d\d)[-:](\d\d)[ T_](\d\d):?(\d\d)', fecha or '')
-    if not m:
-        return path, name
-    stem, ext = os.path.splitext(name)
-    suffix = '_INCOMPLETO' if stem.endswith('_INCOMPLETO') else ''
-    new = '%s-%s-%s_%s-%s_%04d%s%s' % (m.group(1), m.group(2), m.group(3), m.group(4), m.group(5),
-                                       number, suffix, ext)
-    target = os.path.join(os.path.dirname(path), new)
-    try:
-        os.replace(path, target)
-    except OSError:
-        return path, name
-    return target, new
-
-
 def _same_device(source, out_dir):
     """True si la carpeta de salida está en la misma tarjeta que se rescata."""
     out = os.path.abspath(out_dir)
@@ -277,205 +260,351 @@ def _same_device(source, out_dir):
     return False
 
 
-def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir=None,
-          on_clip=None, should_stop=None, start=0, end=None, kinds=('video', 'foto')):
-    """Busca y extrae clips de vídeo y fotos (kinds: 'video', 'foto').
-    Con compare_dir se detiene en cuanto encuentra todos los archivos de esa carpeta y
-    comprueba que los recuperados son idénticos byte a byte.
-    on_clip(dict) se llama con cada archivo guardado; should_stop() permite cancelar."""
+def _plan_size(plan):
+    return plan['end'] - plan['start'] if plan['type'] == 'range' else plan['out_size']
+
+
+def proposed_name(item):
+    """Nombre del archivo recuperado: con la fecha de la cámara si se conoce."""
+    m = re.match(r'(\d{4})[-:](\d\d)[-:](\d\d)[ T_](\d\d):?(\d\d)', item['info'].get('fecha') or '')
+    suffix = '' if item['complete'] else '_INCOMPLETO'
+    if m:
+        return '%s-%s-%s_%s-%s_%04d%s.%s' % (m.group(1), m.group(2), m.group(3), m.group(4),
+                                             m.group(5), item['id'], suffix, item['ext'])
+    return '%s_%04d_%012X%s.%s' % (item['ext'], item['id'], item['offset'], suffix, item['ext'])
+
+
+def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=None, start=0, end=None,
+         on_item=None, preview_dir=None, include_xml=False, emit_incomplete=True):
+    """Explora el origen SIN escribir nada y devuelve lo que se puede recuperar.
+
+    Cada elemento lleva su plan de extracción (un tramo contiguo o el montaje de un clip
+    repartido por la tarjeta), sus metadatos (fecha, cámara, códec, perfil, duración) y, en
+    las fotos, una vista previa. on_item(item) se llama con cada uno; si devuelve True, la
+    exploración se detiene."""
     want_video = 'video' in kinds
     want_photo = 'foto' in kinds
-    if _same_device(source, out_dir):
-        raise ValueError('La carpeta de salida no puede estar en la misma unidad que se rescata: '
-                         'escribir ahí podría sobrescribir los vídeos borrados.')
-    os.makedirs(out_dir, exist_ok=True)
-    targets = load_targets(compare_dir, kinds) if compare_dir else None
-    wanted = sum(len(v) for v in targets.values()) if targets else 0
-    matched = {}
-    if targets:
-        log('Archivos a localizar: %d (de %s)' % (wanted, compare_dir))
-    src = Source(source)
-    results = []
+    items = []
+    state = {'stop': False}
 
-    def new_name(kind, start, suffix='', ext=None):
-        ext = (ext or kind).upper()
-        return '%s_%04d_%012X%s.%s' % (ext, len(results) + 1, start, suffix, ext)
+    def emit(kind, ext, plan, complete, note, brand, info=None, preview=None):
+        item = {'id': len(items) + 1, 'kind': kind, 'ext': ext.upper(), 'plan': plan,
+                'complete': complete, 'note': note, 'brand': brand,
+                'offset': plan.get('start', plan.get('header_pos', 0)), 'size': _plan_size(plan),
+                'info': info or {}, 'preview': preview}
+        item['name'] = proposed_name(item)
+        items.append(item)
+        log('  %s  %8.1f MB  %s%s' % (item['name'], item['size'] / 1048576, note,
+                                      ' [%s]' % brand if brand else ''))
+        if on_item and on_item(item):
+            state['stop'] = True
 
-    def report(out, name, kind, start, size, complete, note, brand):
-        info = {}
-        if kind != 'xml':
-            from . import clipinfo
-            info = photos.summary(out) if kind in PHOTO_KINDS else clipinfo.summary(out)
-            out, name = _friendly_name(out, name, info.get('fecha'), len(results) + 1)
-        extra = ''
-        same_as = None
-        if targets and kind != 'xml' and size in targets:
-            digest = _sha256(out)
-            for tname, tsha in targets[size]:
-                if tsha == digest and tname not in matched:
-                    matched[tname] = name
-                    same_as = tname
-                    extra = '  = %s (idéntico)' % tname
-        log('  %s  %8.1f MB  %s%s%s' % (name, size / 1048576, note,
-                                        ' [%s]' % brand if brand else '', extra))
-        result = {'path': out, 'kind': kind, 'complete': complete, 'note': note,
-                  'offset': start, 'size': size, 'identico_a': same_as}
-        results.append(result)
-        if on_clip and kind != 'xml':
-            on_clip(dict(result, **info))
+    def video_range(s, e, kind, complete, note, brand):
+        head = src.read(s, min(65536, e - s))
+        tail = src.read(max(s, e - 262144), min(262144, e - s))
+        info = clipinfo.summary_blobs([head, tail]) if kind == 'mp4' else {}
+        emit(kind, kind, {'type': 'range', 'start': s, 'end': e}, complete, note, brand, info)
 
-    def save(start, end, kind, complete, note, brand, ext=None):
-        name = new_name(kind, start, '' if complete else '_INCOMPLETO', ext)
-        out = os.path.join(out_dir, name)
-        with open(out, 'wb') as o:
-            pos = start
-            while pos < end:
-                chunk = src.read(pos, min(BLOCK, end - pos))
-                if not chunk:
-                    break
-                o.write(chunk)
-                pos += len(chunk)
-        report(out, name, kind, start, end - start, complete, note, brand)
-
-    def extent(kind, start, limit):
-        return (mp4_extent if kind == 'mp4' else mxf_extent)(src, start, limit)
+    def photo(s, kind, brand):
+        r = photos.extent(kind, src, s, src.size)
+        if r is None:
+            return None     # firma suelta (p.ej. un Exif dentro de otro archivo)
+        e, complete, note, ext = r
+        head = src.read(s, min(e - s, 2621440))
+        preview = None
+        jpeg = photos.embedded_jpeg(head)
+        if jpeg and preview_dir:
+            os.makedirs(preview_dir, exist_ok=True)
+            preview = os.path.join(preview_dir, 'previa_%04d.jpg' % (len(items) + 1))
+            with open(preview, 'wb') as f:
+                f.write(jpeg)
+        emit(kind, ext, {'type': 'range', 'start': s, 'end': e}, complete, note, brand,
+             photos.summary_blob(head, ext), preview)
+        return e if complete else None
 
     def try_pair(clip, om):
         shift = sonycard.locate(src, clip['start'], clip['mdat_off'], om, log)
         if shift is None:
             return False
-        name = new_name('mp4', clip['start'])
-        out = os.path.join(out_dir, name)
-        _size, origin = sonycard.rebuild(src, clip['start'], clip['mdat_off'], clip['mdat_hs'],
-                                         clip['mdat_decl'], shift, om, out)
+        p = sonycard.plan(src, clip['start'], clip['mdat_off'], clip['mdat_hs'], clip['mdat_decl'],
+                          shift, om)
         om.used = True
         clip['paired'] = True
-        report(out, name, 'mp4', clip['start'], os.path.getsize(out), True,
-               'reconstruido (índice en 0x%X, %d fotogramas, %s)' % (om.pos, om.frames, origin),
-               clip['brand'])
+        emit('mp4', 'mp4', p, True, 'reconstruido (índice en 0x%X, %d fotogramas, %s)'
+             % (om.pos, om.frames, p['origin']), clip['brand'],
+             clipinfo.summary_blobs([om.moov_bytes + om.tail_bytes]))
         return True
+
+    def extent(kind, s, limit):
+        return (mp4_extent if kind == 'mp4' else mxf_extent)(src, s, limit)
 
     waiting = []        # cabeceras MP4 cuyo índice está en otra parte de la tarjeta
     orphans = []        # índices (moov) sueltos aún sin pareja
-    try:
-        log('Origen: %s (%.2f GB)' % (src.label, src.size / 1e9))
-        log('Buscando %s...' % ' y '.join(
-            t for t, on in (('clips de vídeo', want_video), ('fotos', want_photo)) if on))
-        scanner = SignatureScanner(src, progress, should_stop, start, end)
-        if start or end:
-            log('Zona: de %.1f GB a %.1f GB' % (scanner.begin / 1e9, scanner.end / 1e9))
-        covered_until = -1
-        for start, kind, brand in scanner:
-            if start < covered_until:
-                continue        # firma falsa dentro de un clip o foto ya recuperados
-            if kind in PHOTO_KINDS:
-                for clip in waiting:
-                    if clip['limit'] is None:
-                        clip['limit'] = start
-                if not want_photo:
-                    continue
-                r = photos.extent(kind, src, start, src.size)
-                if r is None:
-                    continue    # firma suelta (p.ej. un Exif dentro de otro archivo)
-                end, complete, note, ext = r
-                save(start, end, kind, complete, note, brand, ext)
-                if complete:
-                    covered_until = end
-                    scanner.skip_to(end)
-            elif not want_video:
-                continue
-            elif kind == 'xml':
-                if targets:
-                    continue
-                data = src.read(start, 65536)
+    log('Origen: %s (%.2f GB)' % (src.label, src.size / 1e9))
+    log('Buscando %s...' % ' y '.join(
+        t for t, on in (('clips de vídeo', want_video), ('fotos', want_photo)) if on))
+    scanner = SignatureScanner(src, progress, should_stop, start, end)
+    if start or end:
+        log('Zona: de %.1f GB a %.1f GB' % (scanner.begin / 1e9, scanner.end / 1e9))
+    covered_until = -1
+    for pos, kind, brand in scanner:
+        if pos < covered_until:
+            continue        # firma falsa dentro de un clip o foto ya localizados
+        if kind in PHOTO_KINDS:
+            for clip in waiting:
+                if clip['limit'] is None:
+                    clip['limit'] = pos
+            if want_photo:
+                e = photo(pos, kind, brand)
+                if e:
+                    covered_until = e
+                    scanner.skip_to(e)
+        elif not want_video:
+            continue
+        elif kind == 'xml':
+            if include_xml:
+                data = src.read(pos, 65536)
                 e = data.find(b'</NonRealTimeMeta>')
                 if e >= 0:
                     e += len(b'</NonRealTimeMeta>')
                     e += 2 if data[e:e + 2] == b'\r\n' else 1 if data[e:e + 1] == b'\n' else 0
-                    save(start, start + e, 'xml', True, 'metadatos', '')
-                continue
-            elif kind == 'moov':
-                om = sonycard.read_orphan_moov(src, start)
-                if om is None:
-                    continue
+                    emit('xml', 'xml', {'type': 'range', 'start': pos, 'end': pos + e}, True,
+                         'metadatos', '')
+        elif kind == 'moov':
+            om = sonycard.read_orphan_moov(src, pos)
+            if om is not None:
                 # su clip suele ser la cabecera más reciente sin emparejar
                 for clip in reversed([c for c in waiting if not c['paired']][-4:]):
                     if try_pair(clip, om):
                         break
                 if not om.used:
                     orphans = (orphans + [om])[-16:]
-            else:
-                for clip in waiting:
-                    if clip['limit'] is None:
-                        clip['limit'] = start
-                end, complete, note = extent(kind, start, min(start + MAX_INCOMPLETE, src.size))
-                if complete:
-                    save(start, end, kind, complete, note, brand)
-                    covered_until = end
-                    scanner.skip_to(end)
-                else:
-                    hdr = sonycard.clip_header(src, start) if kind == 'mp4' else None
-                    clip = {'start': start, 'kind': kind, 'brand': brand, 'paired': False,
-                            'limit': None, 'mdat_off': None}
-                    if hdr:
-                        clip['mdat_off'], clip['mdat_hs'], clip['mdat_decl'] = hdr
-                        for om in reversed(orphans):
-                            if not om.used and try_pair(clip, om):
-                                break
-                    waiting = [c for c in waiting + [clip] if not c['paired']]
-            if targets and len(matched) == wanted:
-                log('Encontrados los %d clips buscados: búsqueda detenida en %.1f GB de %.1f GB.'
-                    % (wanted, scanner.pos / 1e9, src.size / 1e9))
-                break
-        if scanner.stopped:
-            log('Búsqueda detenida por el usuario en %.1f GB de %.1f GB.' % (
-                scanner.pos / 1e9, src.size / 1e9))
-        if not targets:
-            # clips sin índice: se guardan tal cual para repararlos con una referencia
+        else:
             for clip in waiting:
-                if clip['paired']:
-                    continue
-                limit = clip['limit'] or min(clip['start'] + MAX_INCOMPLETE, src.size)
-                end, complete, note = extent(clip['kind'], clip['start'], limit)
-                if end - clip['start'] <= LONE_HEADER:
-                    # la A9 III deja copias de cabecera sueltas (sin vídeo) junto a cada índice
-                    log('  cabecera sin datos en 0x%X: descartada' % clip['start'])
-                    continue
-                save(clip['start'], end, clip['kind'], complete, note, clip['brand'])
-    finally:
-        src.close()
-    if targets:
-        log('')
-        log('Comparación con %s:' % compare_dir)
-        for size in sorted(targets):
-            for tname, _sha in targets[size]:
-                log('  %-28s %s' % (tname, ('IDÉNTICO → ' + matched[tname]) if tname in matched
-                                    else 'no encontrado'))
+                if clip['limit'] is None:
+                    clip['limit'] = pos
+            e, complete, note = extent(kind, pos, min(pos + MAX_INCOMPLETE, src.size))
+            if complete:
+                video_range(pos, e, kind, True, note, brand)
+                covered_until = e
+                scanner.skip_to(e)
+            else:
+                hdr = sonycard.clip_header(src, pos) if kind == 'mp4' else None
+                clip = {'start': pos, 'kind': kind, 'brand': brand, 'paired': False,
+                        'limit': None, 'mdat_off': None}
+                if hdr:
+                    clip['mdat_off'], clip['mdat_hs'], clip['mdat_decl'] = hdr
+                    for om in reversed(orphans):
+                        if not om.used and try_pair(clip, om):
+                            break
+                waiting = [c for c in waiting + [clip] if not c['paired']]
+        if state['stop']:
+            break
+    if scanner.stopped:
+        log('Exploración detenida por el usuario en %.1f GB de %.1f GB.' % (
+            scanner.pos / 1e9, src.size / 1e9))
+    if emit_incomplete and not state['stop']:
+        # clips sin índice: se ofrecen tal cual para repararlos con una referencia
+        for clip in waiting:
+            if clip['paired']:
+                continue
+            limit = clip['limit'] or min(clip['start'] + MAX_INCOMPLETE, src.size)
+            e, complete, note = extent(clip['kind'], clip['start'], limit)
+            if e - clip['start'] <= LONE_HEADER:
+                # la A9 III deja copias de cabecera sueltas (sin vídeo) junto a cada índice
+                log('  cabecera sin datos en 0x%X: descartada' % clip['start'])
+                continue
+            video_range(clip['start'], e, clip['kind'], complete, note, clip['brand'])
+    return items
 
-    if reference:
-        from . import repair
-        for r in results:
-            if r['kind'] == 'mp4' and not r['complete']:
-                out = r['path'].replace('_INCOMPLETO.MP4', '_REPARADO.MP4')
-                log('')
-                log('Reparando %s ...' % os.path.basename(r['path']))
-                try:
-                    ref = repair.pick_reference(r['path'], reference, log)
-                    repair.repair(r['path'], ref, out, log=log)
-                    r['repaired'] = out
-                    if on_clip:
-                        from . import clipinfo
-                        on_clip(dict(r, path=out, complete=True, note='reparado con referencia',
-                                     **clipinfo.summary(out)))
-                except repair.RepairError as e:
-                    log('  no se pudo reparar: %s' % e)
+
+def extract_item(src, item, out_dir, progress=None):
+    """Guarda un elemento de la exploración. Devuelve la ruta del archivo creado."""
+    path = os.path.join(out_dir, item['name'])
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(path):
+        path = '%s_%d%s' % (base, n, ext)
+        n += 1
+    p = item['plan']
+    if p['type'] == 'sony':
+        sonycard.write_plan(src, p, path, BLOCK, progress)
+        return path
+    with open(path, 'wb') as o:
+        pos = p['start']
+        while pos < p['end']:
+            chunk = src.read(pos, min(BLOCK, p['end'] - pos))
+            if not chunk:
+                break
+            o.write(chunk)
+            pos += len(chunk)
+            if progress:
+                progress(len(chunk))
+    return path
+
+
+class _Verifier:
+    """Compara lo recuperado con una carpeta de originales (SHA-256)."""
+
+    def __init__(self, compare_dir, kinds, log):
+        self.targets = load_targets(compare_dir, kinds) if compare_dir else None
+        self.wanted = sum(len(v) for v in self.targets.values()) if self.targets else 0
+        self.matched = {}
+        self.compare_dir = compare_dir
+        self.log = log
+        if self.targets:
+            log('Archivos a localizar: %d (de %s)' % (self.wanted, compare_dir))
+
+    def check(self, path, size):
+        if not self.targets or size not in self.targets:
+            return None
+        digest = _sha256(path)
+        for tname, tsha in self.targets[size]:
+            if tsha == digest and tname not in self.matched:
+                self.matched[tname] = os.path.basename(path)
+                self.log('     = %s (idéntico)' % tname)
+                return tname
+        return None
+
+    def complete(self):
+        return bool(self.targets) and len(self.matched) == self.wanted
+
+    def report(self):
+        if not self.targets:
+            return
+        self.log('')
+        self.log('Comparación con %s:' % self.compare_dir)
+        for size in sorted(self.targets):
+            for tname, _sha in self.targets[size]:
+                self.log('  %-28s %s' % (tname, ('IDÉNTICO → ' + self.matched[tname])
+                                         if tname in self.matched else 'no encontrado'))
+
+
+def _repair_incomplete(saved, reference, log, on_clip):
+    from . import repair
+    for r in saved:
+        if r['kind'] == 'mp4' and not r['complete']:
+            base, ext = os.path.splitext(r['path'])
+            out = (base.replace('_INCOMPLETO', '_REPARADO', 1) if '_INCOMPLETO' in base
+                   else base + '_REPARADO') + ext
+            log('')
+            log('Reparando %s ...' % os.path.basename(r['path']))
+            try:
+                ref = repair.pick_reference(r['path'], reference, log)
+                repair.repair(r['path'], ref, out, log=log)
+                r['repaired'] = out
+                if on_clip:
+                    on_clip(dict(r, path=out, complete=True, note='reparado con referencia',
+                                 **clipinfo.summary(out)))
+            except repair.RepairError as e:
+                log('  no se pudo reparar: %s' % e)
+
+
+def _public(item, **extra):
+    """Datos de un elemento para la interfaz (sin el plan interno)."""
+    d = {k: item[k] for k in ('id', 'kind', 'ext', 'complete', 'note', 'offset', 'size', 'name',
+                              'preview')}
+    d.update(item['info'])
+    d.update(extra)
+    return d
+
+
+def _check_output(source, out_dir):
+    if _same_device(source, out_dir):
+        raise ValueError('La carpeta de salida no puede estar en la misma unidad que se rescata: '
+                         'escribir ahí podría sobrescribir los vídeos borrados.')
+    os.makedirs(out_dir, exist_ok=True)
+
+
+def _summary(log, saved):
     log('')
     log('Listo: %d clips de vídeo, %d fotos, %d incompletos, %d XML de metadatos.' % (
-        sum(1 for r in results if r['complete'] and r['kind'] in ('mp4', 'mxf')),
-        sum(1 for r in results if r['complete'] and r['kind'] in PHOTO_KINDS),
-        sum(1 for r in results if not r['complete']),
-        sum(1 for r in results if r['kind'] == 'xml')))
-    return results
+        sum(1 for r in saved if r['complete'] and r['kind'] in ('mp4', 'mxf')),
+        sum(1 for r in saved if r['complete'] and r['kind'] in PHOTO_KINDS),
+        sum(1 for r in saved if not r['complete']),
+        sum(1 for r in saved if r['kind'] == 'xml')))
+
+
+def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir=None,
+          on_clip=None, should_stop=None, start=0, end=None, kinds=('video', 'foto')):
+    """Explora y recupera todo lo que encuentra (sin selección previa).
+    Con compare_dir se detiene en cuanto encuentra todos los archivos de esa carpeta y
+    comprueba que los recuperados son idénticos byte a byte."""
+    _check_output(source, out_dir)
+    verifier = _Verifier(compare_dir, kinds, log)
+    src = Source(source)
+    saved = []
+
+    def on_item(item):
+        path = extract_item(src, item, out_dir)
+        same = verifier.check(path, item['size']) if item['kind'] != 'xml' else None
+        r = _public(item, path=path, identico_a=same)
+        saved.append(r)
+        if on_clip and item['kind'] != 'xml':
+            on_clip(r)
+        if verifier.complete():
+            log('Encontrados los %d archivos buscados: búsqueda detenida.' % verifier.wanted)
+            return True
+        return False
+
+    try:
+        scan(src, kinds, log, progress, should_stop, start, end, on_item,
+             include_xml=not verifier.targets, emit_incomplete=not verifier.targets)
+    finally:
+        src.close()
+    verifier.report()
+    if reference:
+        _repair_incomplete(saved, reference, log, on_clip)
+    _summary(log, saved)
+    return saved
+
+
+def explore(source, out_dir, wait_selection, log=print, progress=None, should_stop=None,
+            on_item=None, on_clip=None, compare_dir=None, reference=None, start=0, end=None,
+            kinds=('video', 'foto'), preview_dir=None):
+    """Explora sin escribir, espera a que el usuario elija y recupera solo lo elegido.
+
+    wait_selection(items) devuelve la lista de ids a recuperar (o None para salir)."""
+    _check_output(source, out_dir)
+    src = Source(source)
+    saved = []
+    try:
+        items = scan(src, kinds, log, progress, should_stop, start, end,
+                     (lambda it: on_item(_public(it)) if on_item else None), preview_dir)
+        log('Exploración terminada: %d archivos encontrados.' % len(items))
+        ids = wait_selection(items)
+        if ids is None:
+            log('No se recupera nada.')
+            return []
+        chosen = [it for it in items if it['id'] in set(ids)]
+        total = sum(it['size'] for it in chosen) or 1
+        done = [0]
+
+        def step(n):
+            done[0] += n
+            if progress:
+                progress(min(1.0, done[0] / total))
+
+        verifier = _Verifier(compare_dir, kinds, log)
+        log('Recuperando %d archivos (%.1f GB)…' % (len(chosen), total / 1e9))
+        for it in chosen:
+            if should_stop and should_stop():
+                log('Recuperación detenida por el usuario.')
+                break
+            path = extract_item(src, it, out_dir, step)
+            same = verifier.check(path, it['size'])
+            r = _public(it, path=path, identico_a=same)
+            saved.append(r)
+            log('  guardado %s' % os.path.basename(path))
+            if on_clip:
+                on_clip(r)
+        verifier.report()
+    finally:
+        src.close()
+    if reference:
+        _repair_incomplete(saved, reference, log, on_clip)
+    _summary(log, saved)
+    return saved
 
 
 def make_image(source, image_path, log=print, progress=None, should_stop=None):
