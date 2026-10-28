@@ -248,6 +248,23 @@ def mxf_extent(src, start, limit):
     return limit, False, 'MXF sin cerrar (grabación interrumpida)'
 
 
+def _friendly_name(path, name, fecha, number):
+    """Renombra con la fecha de la cámara: 2026-10-27_16-42_0002.ARW (si se conoce)."""
+    m = re.match(r'(\d{4})[-:](\d\d)[-:](\d\d)[ T_](\d\d):?(\d\d)', fecha or '')
+    if not m:
+        return path, name
+    stem, ext = os.path.splitext(name)
+    suffix = '_INCOMPLETO' if stem.endswith('_INCOMPLETO') else ''
+    new = '%s-%s-%s_%s-%s_%04d%s%s' % (m.group(1), m.group(2), m.group(3), m.group(4), m.group(5),
+                                       number, suffix, ext)
+    target = os.path.join(os.path.dirname(path), new)
+    try:
+        os.replace(path, target)
+    except OSError:
+        return path, name
+    return target, new
+
+
 def _same_device(source, out_dir):
     """True si la carpeta de salida está en la misma tarjeta que se rescata."""
     out = os.path.abspath(out_dir)
@@ -285,6 +302,11 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
         return '%s_%04d_%012X%s.%s' % (ext, len(results) + 1, start, suffix, ext)
 
     def report(out, name, kind, start, size, complete, note, brand):
+        info = {}
+        if kind != 'xml':
+            from . import clipinfo
+            info = photos.summary(out) if kind in PHOTO_KINDS else clipinfo.summary(out)
+            out, name = _friendly_name(out, name, info.get('fecha'), len(results) + 1)
         extra = ''
         same_as = None
         if targets and kind != 'xml' and size in targets:
@@ -300,8 +322,6 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
                   'offset': start, 'size': size, 'identico_a': same_as}
         results.append(result)
         if on_clip and kind != 'xml':
-            from . import clipinfo
-            info = photos.summary(out) if kind in PHOTO_KINDS else clipinfo.summary(out)
             on_clip(dict(result, **info))
 
     def save(start, end, kind, complete, note, brand, ext=None):

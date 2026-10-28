@@ -3,61 +3,25 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QStackedWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, analyze, devices, worker
+from . import __version__, analyze, devices, uikit, worker
 from .events import EventReader
+from .uikit import (ACCENT, BAD, MUTED, OK, WARN, ActionCard, DriveList, human_size, section,
+                    svg_pixmap)
 
-ACCENT = '#f0a43a'
-
-QSS = """
-* { font-size: 13px; }
-QMainWindow, QWidget#page { background: #15171c; color: #e6e6e6; }
-QWidget { color: #e6e6e6; }
-QListWidget#nav { background: #101216; border: none; padding-top: 12px; outline: 0; }
-QListWidget#nav::item { padding: 12px 18px; margin: 2px 8px; border-radius: 8px; color: #b9bcc4; }
-QListWidget#nav::item:selected { background: #262a33; color: #ffffff; }
-QListWidget#nav::item:hover:!selected { background: #1b1e25; }
-QLabel#title { font-size: 22px; font-weight: 600; color: #ffffff; }
-QLabel#subtitle { color: #9aa0ab; }
-QLabel#step { font-size: 14px; font-weight: 600; color: %(accent)s; margin-top: 10px; }
-QLabel#hint { color: #8b919c; font-size: 12px; }
-QFrame#card { background: #1d2027; border: 1px solid #2a2e37; border-radius: 10px; }
-QListWidget#drives { background: #1d2027; border: 1px solid #2a2e37; border-radius: 10px; padding: 6px; outline: 0; }
-QListWidget#drives::item { padding: 12px; border-radius: 8px; margin: 2px; }
-QListWidget#drives::item:selected { background: #2d2516; border: 1px solid %(accent)s; color: #ffffff; }
-QLineEdit { background: #1d2027; border: 1px solid #2f343e; border-radius: 6px; padding: 7px 9px; }
-QLineEdit:focus { border-color: %(accent)s; }
-QPushButton { background: #262a33; border: 1px solid #343944; border-radius: 6px; padding: 7px 14px; }
-QPushButton:hover { background: #2e333d; }
-QPushButton:disabled { color: #6b707a; }
-QPushButton#primary { background: %(accent)s; color: #1a1306; border: none; font-weight: 600; padding: 10px 22px; }
-QPushButton#primary:hover { background: #f6b85c; }
-QPushButton#primary:disabled { background: #5a4a30; color: #2a2112; }
-QPushButton#danger { background: #4a2326; border-color: #6b2f33; }
-QProgressBar { background: #1d2027; border: 1px solid #2a2e37; border-radius: 6px; height: 14px; text-align: center; color: transparent; }
-QProgressBar::chunk { background: %(accent)s; border-radius: 5px; }
-QTableWidget { background: #1a1d23; alternate-background-color: #1d2027; border: 1px solid #2a2e37; border-radius: 8px; gridline-color: #262a33; }
-QHeaderView::section { background: #1d2027; color: #9aa0ab; border: none; border-bottom: 1px solid #2a2e37; padding: 6px; }
-QTableWidget::item:selected { background: #2d2516; color: #ffffff; }
-QPlainTextEdit { background: #101216; border: 1px solid #2a2e37; border-radius: 8px; font-family: Consolas, Menlo, monospace; font-size: 12px; }
-QCheckBox::indicator { width: 16px; height: 16px; }
-QToolButton { border: none; color: #9aa0ab; }
-""" % {'accent': ACCENT}
+PHOTO_KINDS = ('raw', 'heif', 'jpg')
 
 
-def human_size(n):
-    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
-        if n < 1024 or unit == 'TB':
-            return ('%.0f %s' if unit in ('B', 'KB') else '%.1f %s') % (n, unit)
-        n /= 1024.0
+def qss():
+    return uikit.stylesheet()
 
 
 def human_time(s):
@@ -68,9 +32,7 @@ def human_time(s):
     s = int(round(s))
     if s >= 3600:
         return '%d h %02d min' % (s // 3600, s % 3600 // 60)
-    if s >= 60:
-        return '%d min %02d s' % (s // 60, s % 60)
-    return '%d s' % s
+    return '%d min %02d s' % (s // 60, s % 60)
 
 
 def default_output():
@@ -79,7 +41,8 @@ def default_output():
 
 
 def open_path(path):
-    QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+    if path:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 def asset(name):
@@ -93,7 +56,7 @@ def logo_pixmap(height, color=ACCENT):
     src = QPixmap(asset('logo.png'))
     if src.isNull():
         return QPixmap()
-    src = src.scaledToHeight(height, Qt.SmoothTransformation)
+    src = src.scaledToHeight(height * 2, Qt.SmoothTransformation)
     pm = QPixmap(src.size())
     pm.fill(Qt.transparent)
     p = QPainter(pm)
@@ -101,6 +64,7 @@ def logo_pixmap(height, color=ACCENT):
     p.setCompositionMode(QPainter.CompositionMode_SourceIn)
     p.fillRect(pm.rect(), QColor(color))
     p.end()
+    pm.setDevicePixelRatio(2)
     return pm
 
 
@@ -114,9 +78,17 @@ def app_icon(size=256):
     p.setPen(Qt.NoPen)
     m = size // 32
     p.drawRoundedRect(m, m, size - 2 * m, size - 2 * m, size * 0.2, size * 0.2)
-    logo = logo_pixmap(int(size * 0.68))
+    logo = QPixmap(asset('logo.png'))
     if not logo.isNull():
-        p.drawPixmap((size - logo.width()) // 2, (size - logo.height()) // 2, logo)
+        logo = logo.scaledToHeight(int(size * 0.68), Qt.SmoothTransformation)
+        tinted = QPixmap(logo.size())
+        tinted.fill(Qt.transparent)
+        q = QPainter(tinted)
+        q.drawPixmap(0, 0, logo)
+        q.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        q.fillRect(tinted.rect(), QColor(ACCENT))
+        q.end()
+        p.drawPixmap((size - tinted.width()) // 2, (size - tinted.height()) // 2, tinted)
     p.end()
     return QIcon(pm)
 
@@ -137,7 +109,6 @@ class Job(QObject):
         self.elevate = elevate
         self.reader = None
         self.proc = None
-        self.started_events = False
         self.done = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
@@ -153,7 +124,6 @@ class Job(QObject):
 
     def _poll(self):
         for ev in self.reader.poll():
-            self.started_events = True
             t = ev.get('t')
             if t == 'log':
                 self.log.emit(ev['msg'])
@@ -167,16 +137,15 @@ class Job(QObject):
                 self._finish(ev.get('ok', False), ev.get('msg', ''))
                 return
         if self.proc is not None and self.proc.poll() is not None and not self.done:
-            # el proceso terminó sin avisar: mostramos su error
-            for ev in self.reader.poll():
+            for ev in self.reader.poll():           # el proceso terminó: ¿dejó su resultado?
                 if ev.get('t') == 'done':
                     self._finish(ev.get('ok', False), ev.get('msg', ''))
                     return
             err = ''
             try:
                 with open(self.reader.path + '.err', encoding='utf-8', errors='replace') as f:
-                    err = f.read().strip().splitlines()[-1:] or ['']
-                    err = err[0]
+                    lines = f.read().strip().splitlines()
+                    err = lines[-1] if lines else ''
             except OSError:
                 pass
             self._finish(False, err or 'El proceso terminó inesperadamente.')
@@ -185,6 +154,10 @@ class Job(QObject):
         self.done = True
         self.timer.stop()
         self.finished.emit(ok, msg)
+
+    @property
+    def running(self):
+        return self.reader is not None and not self.done
 
 
 class AnalyzeThread(QThread):
@@ -201,12 +174,13 @@ class AnalyzeThread(QThread):
             self.result.emit('No se pudo analizar: %s' % e)
 
 
-# ---------------------------------------------------------------- utilidades de interfaz
+# ---------------------------------------------------------------- piezas comunes
 
 def page_header(title, subtitle):
     w = QWidget()
     lay = QVBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 6)
+    lay.setContentsMargins(0, 0, 0, 4)
+    lay.setSpacing(4)
     t = QLabel(title)
     t.setObjectName('title')
     s = QLabel(subtitle)
@@ -217,17 +191,43 @@ def page_header(title, subtitle):
     return w
 
 
-def step_label(text):
-    lab = QLabel(text)
-    lab.setObjectName('step')
-    return lab
-
-
 def hint(text):
     lab = QLabel(text)
     lab.setObjectName('hint')
     lab.setWordWrap(True)
     return lab
+
+
+def card(*widgets, margins=(16, 14, 16, 14), spacing=8):
+    f = QFrame()
+    f.setObjectName('card')
+    lay = QVBoxLayout(f)
+    lay.setContentsMargins(*margins)
+    lay.setSpacing(spacing)
+    for w in widgets:
+        if isinstance(w, QWidget):
+            lay.addWidget(w)
+        else:
+            lay.addLayout(w)
+    return f
+
+
+def page_scaffold(widget):
+    """Página con desplazamiento vertical por si la ventana es pequeña."""
+    widget.setObjectName('page')
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    inner = QWidget()
+    inner.setObjectName('page')
+    scroll.setWidget(inner)
+    outer = QVBoxLayout(widget)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.addWidget(scroll)
+    lay = QVBoxLayout(inner)
+    lay.setContentsMargins(36, 28, 36, 24)
+    lay.setSpacing(14)
+    return lay
 
 
 class PathRow(QWidget):
@@ -259,70 +259,26 @@ class PathRow(QWidget):
         self.edit.setText(t)
 
 
-CLIP_COLUMNS = ['Estado', 'Archivo', 'Duración', 'Códec', 'Perfil', 'Fecha', 'Tamaño']
-
-
-def clip_table():
-    t = QTableWidget(0, len(CLIP_COLUMNS))
-    t.setHorizontalHeaderLabels(CLIP_COLUMNS)
-    t.verticalHeader().setVisible(False)
-    t.setAlternatingRowColors(True)
-    t.setSelectionBehavior(QAbstractItemView.SelectRows)
-    t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-    t.setShowGrid(False)
-    h = t.horizontalHeader()
-    h.setSectionResizeMode(QHeaderView.ResizeToContents)
-    h.setSectionResizeMode(1, QHeaderView.Stretch)
-    t.cellDoubleClicked.connect(lambda r, _c: open_path(t.item(r, 1).data(Qt.UserRole)))
-    t.setToolTip('Doble clic para abrir el clip')
-    return t
-
-
-def add_clip_row(table, ev):
-    if ev.get('identico_a'):
-        state, color = '✔ Idéntico a ' + ev['identico_a'], '#7bd88f'
-    elif ev.get('complete'):
-        state, color = 'Recuperado', '#7bd88f'
-    else:
-        state, color = 'Incompleto', '#f0c05a'
-    values = [state, os.path.basename(ev.get('path', '')), human_time(ev.get('duracion')),
-              ev.get('codec') or '—', ev.get('perfil') or '—', ev.get('fecha') or '—',
-              human_size(ev.get('size') or 0)]
-    r = table.rowCount()
-    table.insertRow(r)
-    for c, v in enumerate(values):
-        it = QTableWidgetItem(v)
-        if c == 0:
-            it.setForeground(QColor(color))
-        if c == 1:
-            it.setData(Qt.UserRole, ev.get('path'))
-            it.setToolTip('%s\n%s' % (ev.get('path'), ev.get('note', '')))
-        table.setItem(r, c, it)
-    table.scrollToBottom()
-
-
 class LogPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.toggle = QPushButton('▸ Ver registro detallado')
+        self.toggle = QPushButton('▸  Registro detallado')
+        self.toggle.setObjectName('link')
         self.toggle.setCheckable(True)
-        self.toggle.setFlat(True)
-        self.toggle.setStyleSheet('text-align: left; border: none; background: transparent; '
-                                  'color: #9aa0ab; padding: 2px 0;')
         self.toggle.toggled.connect(self._toggled)
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setMaximumBlockCount(5000)
         self.text.setVisible(False)
-        self.text.setMinimumHeight(140)
+        self.text.setMinimumHeight(150)
         lay.addWidget(self.toggle, 0, Qt.AlignLeft)
         lay.addWidget(self.text)
 
     def _toggled(self, on):
         self.text.setVisible(on)
-        self.toggle.setText(('▾ Ocultar' if on else '▸ Ver') + ' registro detallado')
+        self.toggle.setText(('▾' if on else '▸') + '  Registro detallado')
 
     def append(self, msg):
         self.text.appendPlainText(msg)
@@ -331,158 +287,153 @@ class LogPanel(QWidget):
         self.text.clear()
 
 
-# ---------------------------------------------------------------- páginas
+class ProgressPanel(QWidget):
+    """Barra + línea de datos; oculta mientras no hay nada en marcha."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.stats = QLabel('')
+        self.stats.setObjectName('hint')
+        lay.addWidget(self.bar)
+        lay.addWidget(self.stats)
+        self.setVisible(False)
+
+    def set(self, p, text=None):
+        self.setVisible(True)
+        self.bar.setValue(int(p * 1000))
+        if text is not None:
+            self.stats.setText(text)
+
+
+def status_item(text, color):
+    it = QTableWidgetItem('●  ' + text)
+    it.setForeground(QColor(color))
+    return it
+
+
+# ---------------------------------------------------------------- rescatar tarjeta
 
 class RescuePage(QWidget):
+    COLS = ['', 'Archivo', 'Duración', 'Formato', 'Perfil', 'Tamaño', 'Estado']
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('page')
         self.job = None
         self.stack = QStackedWidget()
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(32, 26, 32, 22)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.stack)
-        self.stack.addWidget(self._setup_view())
+        setup = QWidget()
+        self._setup_view(page_scaffold(setup))
+        self.stack.addWidget(setup)
         self.stack.addWidget(self._run_view())
         self.refresh_drives()
 
-    # ---- paso 1: configuración
-    def _setup_view(self):
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(page_header('Rescatar vídeos y fotos de una tarjeta',
-                                  'Recupera vídeos y fotos borrados o perdidos tras formatear la tarjeta. '
-                                  'Solo se lee la tarjeta: nunca se escribe en ella.'))
-        top = QHBoxLayout()
-        top.addWidget(step_label('1. Elige la tarjeta'))
-        top.addStretch(1)
+    # ---- configuración
+    def _setup_view(self, lay):
+        lay.addWidget(page_header('Rescatar vídeos y fotos',
+                                  'Recupera lo borrado o perdido tras formatear la tarjeta. Solo se lee '
+                                  'la tarjeta: nunca se escribe en ella.'))
+        head = QHBoxLayout()
+        head.addWidget(section('1 · Tarjeta'))
+        head.addStretch(1)
         refresh = QPushButton('Actualizar')
         refresh.clicked.connect(self.refresh_drives)
         img = QPushButton('Usar imagen de disco…')
         img.clicked.connect(self.pick_image)
-        top.addWidget(refresh)
-        top.addWidget(img)
-        lay.addLayout(top)
-        self.drives = QListWidget()
-        self.drives.setObjectName('drives')
-        self.drives.setMinimumHeight(150)
-        self.drives.itemSelectionChanged.connect(self._validate)
+        head.addWidget(refresh)
+        head.addWidget(img)
+        lay.addLayout(head)
+        self.drives = DriveList(self._validate)
         lay.addWidget(self.drives)
         lay.addWidget(hint('Conecta la tarjeta con un lector o la cámara en modo USB «Mass Storage». '
                            'Si el sistema ofrece formatearla, pulsa Cancelar.'))
 
-        lay.addWidget(step_label('2. Qué buscar'))
+        lay.addWidget(section('2 · Qué buscar'))
         kinds = QHBoxLayout()
-        self.want_video = QCheckBox('Vídeo (XAVC S / HS / S-I, MXF)')
-        self.want_photo = QCheckBox('Fotos (RAW ARW, HEIF, JPG)')
+        kinds.setSpacing(24)
+        self.want_video = QCheckBox('Vídeo  ·  XAVC S / HS / S-I, MXF')
+        self.want_photo = QCheckBox('Fotos  ·  RAW (ARW), HEIF, JPG')
         for cb in (self.want_video, self.want_photo):
             cb.setChecked(True)
             cb.toggled.connect(self._validate)
             kinds.addWidget(cb)
         kinds.addStretch(1)
-        lay.addLayout(kinds)
+        lay.addWidget(card(kinds))
 
-        lay.addWidget(step_label('3. Dónde guardar lo recuperado'))
+        lay.addWidget(section('3 · Dónde guardar'))
         self.out = PathRow('Carpeta en otro disco')
         self.out.setText(default_output())
         self.out.edit.textChanged.connect(self._validate)
-        lay.addWidget(self.out)
-        lay.addWidget(hint('Debe estar en otro disco, nunca en la tarjeta que se rescata.'))
+        lay.addWidget(card(self.out, hint('Debe estar en otro disco, nunca en la tarjeta que se rescata.')))
 
-        self.adv_toggle = QToolButton()
-        self.adv_toggle.setText('▸ Opciones avanzadas')
+        self.adv_toggle = QPushButton('▸  Opciones avanzadas')
+        self.adv_toggle.setObjectName('link')
         self.adv_toggle.setCheckable(True)
         lay.addWidget(self.adv_toggle, 0, Qt.AlignLeft)
-        adv = QFrame()
-        adv.setObjectName('card')
-        g = QGridLayout(adv)
-        g.setContentsMargins(14, 12, 14, 12)
         self.ref = PathRow('(opcional) carpeta con clips sanos de la misma cámara')
-        self.cmp = PathRow('(opcional) carpeta con copias de los clips para verificar')
+        self.cmp = PathRow('(opcional) carpeta con copias de los archivos para verificar')
+        g = QGridLayout()
+        g.setHorizontalSpacing(12)
         g.addWidget(QLabel('Referencias para reparar incompletos'), 0, 0)
         g.addWidget(self.ref, 0, 1)
         g.addWidget(QLabel('Verificar contra carpeta'), 1, 0)
         g.addWidget(self.cmp, 1, 1)
-        g.addWidget(hint('Con «Verificar», la búsqueda se detiene al encontrar todos esos clips y '
-                         'comprueba que los recuperados son idénticos byte a byte (SHA-256).'), 2, 0, 1, 2)
+        adv = card(g, hint('Con «Verificar», la búsqueda se detiene al encontrar todos esos archivos y '
+                           'comprueba que los recuperados son idénticos byte a byte (SHA-256).'))
         adv.setVisible(False)
         self.adv_toggle.toggled.connect(lambda on: (adv.setVisible(on), self.adv_toggle.setText(
-            ('▾' if on else '▸') + ' Opciones avanzadas')))
+            ('▾' if on else '▸') + '  Opciones avanzadas')))
         lay.addWidget(adv)
         lay.addStretch(1)
-
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        self.go = QPushButton('Buscar clips')
+        self.go = QPushButton('Buscar')
         self.go.setObjectName('primary')
         self.go.clicked.connect(self.start)
         bottom.addWidget(self.go)
         lay.addLayout(bottom)
-        return w
 
     def refresh_drives(self):
-        self.drives.clear()
-        for d in devices.list_drives():
-            if d['system']:
-                continue
-            label = '%s   %s   ·   %s   ·   %s' % (d['id'], d['name'], d['fs'] or '—',
-                                                  human_size(d['size']) if d['size'] else '—')
-            it = QListWidgetItem(self.style().standardIcon(
-                self.style().StandardPixmap.SP_DriveFDIcon if d['removable']
-                else self.style().StandardPixmap.SP_DriveHDIcon), label)
-            it.setData(Qt.UserRole, d)
-            self.drives.addItem(it)
-        if self.drives.count() == 0:
-            it = QListWidgetItem('No se detecta ninguna tarjeta. Conéctala y pulsa «Actualizar».')
-            it.setFlags(Qt.NoItemFlags)
-            self.drives.addItem(it)
-        self._validate()
+        self.drives.set_drives([d for d in devices.list_drives() if not d['system']],
+                               'No se detecta ninguna tarjeta. Conéctala y pulsa «Actualizar».')
 
     def pick_image(self):
         p, _ = QFileDialog.getOpenFileName(self, 'Imagen de la tarjeta', '',
                                            'Imágenes de disco (*.img *.dd *.bin *.dmg);;Todos (*)')
-        if not p:
-            return
-        p = os.path.normpath(p)
-        d = {'id': p, 'name': 'Imagen de disco', 'fs': '', 'size': os.path.getsize(p),
-             'removable': False, 'system': False, 'image': True}
-        it = QListWidgetItem(self.style().standardIcon(self.style().StandardPixmap.SP_FileIcon),
-                             '%s   ·   %s' % (os.path.basename(p), human_size(d['size'])))
-        it.setData(Qt.UserRole, d)
-        self.drives.addItem(it)
-        self.drives.setCurrentItem(it)
-
-    def _selected(self):
-        it = self.drives.currentItem()
-        return it.data(Qt.UserRole) if it else None
+        if p:
+            p = os.path.normpath(p)
+            self.drives.add({'id': p, 'name': 'Imagen de disco', 'fs': '', 'size': os.path.getsize(p),
+                             'removable': False, 'system': False, 'image': True})
 
     def _validate(self):
-        self.go.setEnabled(bool(self._selected()) and bool(self.out.text())
-                           and (self.want_video.isChecked() or self.want_photo.isChecked()))
+        if hasattr(self, 'go'):
+            self.go.setEnabled(bool(self.drives.selected()) and bool(self.out.text())
+                               and (self.want_video.isChecked() or self.want_photo.isChecked()))
 
-    # ---- paso 2: búsqueda y resultados
+    # ---- búsqueda y resultados
     def _run_view(self):
         w = QWidget()
+        w.setObjectName('page')
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(36, 28, 36, 24)
+        lay.setSpacing(12)
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
         self.run_title = QLabel('Buscando…')
         self.run_title.setObjectName('title')
         self.run_sub = QLabel('')
         self.run_sub.setObjectName('subtitle')
-        lay.addWidget(self.run_title)
-        lay.addWidget(self.run_sub)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        lay.addWidget(self.bar)
-        self.stats = QLabel('')
-        self.stats.setObjectName('hint')
-        lay.addWidget(self.stats)
-        self.table = clip_table()
-        lay.addWidget(self.table, 1)
-        self.log = LogPanel()
-        lay.addWidget(self.log)
-        row = QHBoxLayout()
+        self.run_sub.setWordWrap(True)
+        titles.addWidget(self.run_title)
+        titles.addWidget(self.run_sub)
+        head.addLayout(titles, 1)
         self.stop_btn = QPushButton('Detener')
         self.stop_btn.setObjectName('danger')
         self.stop_btn.clicked.connect(self.stop)
@@ -491,15 +442,59 @@ class RescuePage(QWidget):
         self.new_btn = QPushButton('Nueva búsqueda')
         self.new_btn.setObjectName('primary')
         self.new_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        row.addWidget(self.stop_btn)
-        row.addStretch(1)
-        row.addWidget(self.open_btn)
-        row.addWidget(self.new_btn)
-        lay.addLayout(row)
+        for b in (self.stop_btn, self.open_btn, self.new_btn):
+            head.addWidget(b, 0, Qt.AlignTop)
+        lay.addLayout(head)
+        self.progress = ProgressPanel()
+        lay.addWidget(self.progress)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.setIconSize(QSize(18, 18))
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.setWordWrap(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        h = self.table.horizontalHeader()
+        h.setMinimumSectionSize(34)
+        for col, width in ((0, 34), (2, 70), (3, 200), (4, 160), (5, 80), (6, 150)):
+            h.setSectionResizeMode(col, QHeaderView.Interactive)
+            self.table.setColumnWidth(col, width)
+        h.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.cellDoubleClicked.connect(lambda r, _c: open_path(self.table.item(r, 1).data(Qt.UserRole)))
+        self.table.itemSelectionChanged.connect(self._show_preview)
+        self.table.setToolTip('Doble clic para abrir')
+        body.addWidget(self.table, 1)
+        lay.addLayout(body, 1)
+        # vista previa de la foto seleccionada, debajo de la tabla
+        self.preview = QLabel()
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setFixedSize(240, 160)
+        self.preview.setObjectName('hint')
+        self.preview_info = QLabel()
+        self.preview_info.setWordWrap(True)
+        self.preview_info.setTextFormat(Qt.RichText)
+        prow = QHBoxLayout()
+        prow.setSpacing(16)
+        prow.addWidget(self.preview)
+        prow.addWidget(self.preview_info, 1, Qt.AlignTop)
+        self.preview_card = card(prow, margins=(12, 12, 16, 12))
+        self.preview_card.setVisible(False)
+        lay.addWidget(self.preview_card)
+        self.log = LogPanel()
+        lay.addWidget(self.log)
         return w
 
     def start(self):
-        d = self._selected()
+        d = self.drives.selected()
         self.out_dir = self.out.text()
         if not d or not self.out_dir:
             return
@@ -518,16 +513,16 @@ class RescuePage(QWidget):
         elevate = devices.is_device(d['id'])
         self.source_size = d.get('size') or 0
         self.table.setRowCount(0)
+        self.preview_card.setVisible(False)
         self.log.clear()
-        self.found = self.videos = self.photos = 0
-        self.bar.setValue(0)
-        self.run_title.setText('Buscando en %s' % (d['id'] if not d.get('image')
-                                                  else os.path.basename(d['id'])))
+        self.videos = self.photos = 0
+        self.progress.setVisible(False)
+        name = d['id'] if not d.get('image') else os.path.basename(d['id'])
+        self.run_title.setText('Buscando en %s' % name)
         self.run_sub.setText('Esperando permiso de Administrador…' if elevate and not devices.is_admin()
-                             else 'Leyendo…')
-        self.stats.setText('')
+                             else 'Preparando…')
+        self.stop_btn.setVisible(True)
         self.stop_btn.setEnabled(True)
-        self.open_btn.setEnabled(True)
         self.new_btn.setVisible(False)
         self.stack.setCurrentIndex(1)
         self.t0 = None
@@ -547,6 +542,10 @@ class RescuePage(QWidget):
             self.stop_btn.setEnabled(False)
             self.run_sub.setText('Deteniendo…')
 
+    def _counts(self):
+        return '%d vídeo%s · %d foto%s' % (self.videos, '' if self.videos == 1 else 's',
+                                           self.photos, '' if self.photos == 1 else 's')
+
     def _on_log(self, msg):
         if self.t0 is None:
             self.t0 = time.monotonic()
@@ -556,101 +555,165 @@ class RescuePage(QWidget):
     def _on_progress(self, p):
         if self.t0 is None:
             self.t0 = time.monotonic()
-        self.bar.setValue(int(p * 1000))
         el = time.monotonic() - self.t0
         parts = ['%.0f %%' % (p * 100)]
         if self.source_size:
             parts.append('%s de %s' % (human_size(self.source_size * p), human_size(self.source_size)))
-            if el > 3 and p > 0.002:
+            if el > 3 and 0.002 < p < 1:
                 parts.append('%s/s' % human_size(self.source_size * p / el))
                 parts.append('quedan ~%s' % human_time(el / p * (1 - p)))
-        parts.append(self._counts())
-        self.stats.setText('   ·   '.join(parts))
-
-    def _counts(self):
-        return '%d vídeos · %d fotos recuperados' % (self.videos, self.photos)
+        parts.append(self._counts() + ' recuperados')
+        self.progress.set(p, '   ·   '.join(parts))
 
     def _on_clip(self, ev):
-        self.found += 1
-        if ev.get('kind') in ('raw', 'heif', 'jpg'):
+        photo = ev.get('kind') in PHOTO_KINDS
+        if photo:
             self.photos += 1
         else:
             self.videos += 1
-        add_clip_row(self.table, ev)
+        if ev.get('identico_a'):
+            state, color = 'Idéntico a ' + ev['identico_a'], OK
+        elif ev.get('complete'):
+            state, color = 'Recuperado', OK
+        else:
+            state, color = 'Incompleto', WARN
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        kind = QTableWidgetItem()
+        kind.setIcon(QIcon(svg_pixmap('photo' if photo else 'video', ACCENT if photo else '#7aa7ff', 18)))
+        kind.setToolTip('Foto' if photo else 'Vídeo')
+        name = QTableWidgetItem(os.path.basename(ev.get('path', '')))
+        name.setData(Qt.UserRole, ev.get('path'))
+        name.setData(Qt.UserRole + 1, photo)
+        name.setToolTip('%s\n%s' % (ev.get('path'), ev.get('note', '')))
+        name.setData(Qt.UserRole + 2, ev)
+        cells = [kind, name, QTableWidgetItem(human_time(ev.get('duracion')) if not photo else '—'),
+                 QTableWidgetItem(ev.get('codec') or '—'), QTableWidgetItem(ev.get('perfil') or '—'),
+                 QTableWidgetItem(human_size(ev.get('size') or 0)), status_item(state, color)]
+        cells[-1].setToolTip(state)
+        for c, it in enumerate(cells):
+            self.table.setItem(r, c, it)
+        self.table.scrollToBottom()
+
+    def _show_preview(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        it = self.table.item(rows[0].row(), 1)
+        if not it.data(Qt.UserRole + 1):
+            self.preview_card.setVisible(False)
+            return
+        pm = uikit.preview_pixmap(it.data(Qt.UserRole), 240)
+        if pm is None:
+            self.preview.setText('Sin vista previa')
+        else:
+            self.preview.setPixmap(pm)
+        ev = it.data(Qt.UserRole + 2) or {}
+        self.preview_info.setText(
+            '<span style="color:#fff;font-size:14px;font-weight:600">%s</span><br>'
+            '<span style="color:%s">%s · %s · %s</span><br><br>'
+            '<span style="color:%s">%s</span><br><span style="color:%s">Doble clic en la fila para abrirla.</span>'
+            % (os.path.basename(ev.get('path', '')), MUTED, ev.get('codec') or '—', ev.get('fecha') or '—',
+               human_size(ev.get('size') or 0), MUTED, ev.get('path', ''), MUTED))
+        self.preview_card.setVisible(True)
 
     def _on_finished(self, ok, msg):
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setVisible(False)
         self.new_btn.setVisible(True)
         if ok:
-            self.bar.setValue(1000)
+            self._on_progress(1.0)
             self.run_title.setText('Terminado: ' + self._counts())
             self.run_sub.setText('Doble clic en un archivo para abrirlo. Están en %s' % self.out_dir)
         else:
             self.run_title.setText('No se pudo completar')
             self.run_sub.setText(msg)
-        self._on_progress(self.bar.value() / 1000.0)
 
+
+# ---------------------------------------------------------------- reparar clip
 
 class RepairPage(QWidget):
     COLS = ['Estado', 'Clip dañado', 'Duración', 'Perfil', 'Resultado']
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('page')
         self.setAcceptDrops(True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(32, 26, 32, 22)
+        lay = page_scaffold(self)
         lay.addWidget(page_header('Reparar clips interrumpidos',
-                                  'Para clips que no abren porque la grabación se cortó (batería, '
-                                  'tarjeta extraída, apagado). Reconstruye el índice sin recodificar: '
-                                  'S-Log3, S-Cinetone y 10 bits se conservan intactos.'))
-        top = QHBoxLayout()
-        top.addWidget(step_label('1. Clips dañados'))
-        top.addStretch(1)
+                                  'Para clips que no abren porque la grabación se cortó (batería, tarjeta '
+                                  'extraída, apagado). Reconstruye el índice sin recodificar: S-Log3, '
+                                  'S-Cinetone y 10 bits se conservan intactos.'))
+        head = QHBoxLayout()
+        head.addWidget(section('1 · Clips dañados'))
+        head.addStretch(1)
         add = QPushButton('Añadir clips…')
         add.clicked.connect(self.add_files)
         clear = QPushButton('Quitar todos')
         clear.clicked.connect(lambda: self.table.setRowCount(0))
-        top.addWidget(add)
-        top.addWidget(clear)
-        lay.addLayout(top)
+        head.addWidget(add)
+        head.addWidget(clear)
+        lay.addLayout(head)
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setShowGrid(False)
+        self.table.setMinimumHeight(180)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_result)
-        lay.addWidget(self.table, 1)
-        lay.addWidget(hint('También puedes arrastrar los archivos aquí.'))
+        drop = QFrame()
+        drop.setObjectName('card')
+        drop.setStyleSheet('QFrame#card { border: 1px dashed #3a404b; }')
+        drop.setMinimumHeight(200)
+        dl = QVBoxLayout(drop)
+        dl.setAlignment(Qt.AlignCenter)
+        di = QLabel()
+        di.setPixmap(svg_pixmap('repair', MUTED, 40))
+        di.setAlignment(Qt.AlignCenter)
+        dt = QLabel('Arrastra aquí los clips que no abren')
+        dt.setObjectName('cardTitle')
+        dt.setAlignment(Qt.AlignCenter)
+        ds = hint('o usa «Añadir clips…». Se reparan uno tras otro con la misma referencia.')
+        ds.setAlignment(Qt.AlignCenter)
+        for w in (di, dt, ds):
+            dl.addWidget(w)
+        self.list_stack = QStackedWidget()
+        self.list_stack.addWidget(drop)
+        self.list_stack.addWidget(self.table)
+        self.table.model().rowsInserted.connect(self._update_empty)
+        self.table.model().rowsRemoved.connect(self._update_empty)
+        self.table.model().modelReset.connect(self._update_empty)
+        lay.addWidget(self.list_stack, 1)
 
-        lay.addWidget(step_label('2. Clip(s) de referencia'))
+        lay.addWidget(section('2 · Referencia'))
         self.ref = PathRow('Carpeta con clips sanos (se elige el compatible) o un clip concreto')
         btn_file = QPushButton('Un clip…')
         btn_file.clicked.connect(self._pick_ref_file)
         self.ref.layout().addWidget(btn_file)
-        lay.addWidget(self.ref)
-        lay.addWidget(hint('Clips sanos de la misma cámara con el mismo formato, resolución, fps y '
-                           'bitrate. Basta con 5–30 s. Si das una carpeta, se elige automáticamente.'))
-        lay.addWidget(step_label('3. Dónde guardar'))
+        lay.addWidget(card(self.ref, hint('Clips sanos de la misma cámara con el mismo formato, resolución, '
+                                          'fps y bitrate. Basta con 5–30 s. Si das una carpeta, se elige '
+                                          'automáticamente.')))
+        lay.addWidget(section('3 · Dónde guardar'))
         self.out = PathRow('(por defecto, junto a cada clip dañado)')
-        lay.addWidget(self.out)
-        self.log = LogPanel()
-        lay.addWidget(self.log)
+        lay.addWidget(card(self.out))
+        self.progress = ProgressPanel()
+        lay.addWidget(self.progress)
         row = QHBoxLayout()
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        row.addWidget(self.bar, 1)
+        self.log = LogPanel()
+        row.addWidget(self.log, 1, Qt.AlignTop)
         self.go = QPushButton('Reparar')
         self.go.setObjectName('primary')
         self.go.clicked.connect(self.start)
-        row.addWidget(self.go)
+        row.addWidget(self.go, 0, Qt.AlignTop)
         lay.addLayout(row)
         self.queue = []
         self.job = None
+
+    def _update_empty(self, *_):
+        self.list_stack.setCurrentIndex(1 if self.table.rowCount() else 0)
 
     def _pick_ref_file(self):
         p, _ = QFileDialog.getOpenFileName(self, 'Clip de referencia', '', 'Vídeo (*.mp4 *.MP4 *.mov)')
@@ -674,25 +737,24 @@ class RepairPage(QWidget):
                 continue
             r = self.table.rowCount()
             self.table.insertRow(r)
-            vals = ['Pendiente', os.path.basename(f), '—', '—', '']
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(v)
-                if c == 1:
-                    it.setData(Qt.UserRole, os.path.normpath(f))
-                    it.setToolTip(f)
-                self.table.setItem(r, c, it)
+            self.table.setItem(r, 0, status_item('Pendiente', MUTED))
+            name = QTableWidgetItem(os.path.basename(f))
+            name.setData(Qt.UserRole, os.path.normpath(f))
+            name.setToolTip(f)
+            self.table.setItem(r, 1, name)
+            for c in (2, 3, 4):
+                self.table.setItem(r, c, QTableWidgetItem('—' if c < 4 else ''))
 
     def _open_result(self, r, _c):
         it = self.table.item(r, 4)
-        path = it.data(Qt.UserRole) if it else None
-        open_path(path or self.table.item(r, 1).data(Qt.UserRole))
+        open_path((it.data(Qt.UserRole) if it else None) or self.table.item(r, 1).data(Qt.UserRole))
 
     def start(self):
         if not self.ref.text():
             QMessageBox.information(self, 'Referencia', 'Indica una carpeta con clips sanos o un clip de referencia.')
             return
         self.queue = [r for r in range(self.table.rowCount())
-                      if self.table.item(r, 0).text() in ('Pendiente', 'Error')]
+                      if self.table.item(r, 0).text().endswith(('Pendiente', 'Error'))]
         if not self.queue:
             return
         self.go.setEnabled(False)
@@ -704,18 +766,18 @@ class RepairPage(QWidget):
     def _next(self):
         if not self.queue:
             self.go.setEnabled(True)
-            self.bar.setValue(1000)
+            self.progress.set(1.0, 'Terminado: %d clip(s)' % self.total)
             return
         self.row = self.queue.pop(0)
         src = self.table.item(self.row, 1).data(Qt.UserRole)
         out_dir = self.out.text() or os.path.dirname(src)
         out = os.path.join(out_dir, os.path.splitext(os.path.basename(src))[0] + '_REPARADO.MP4')
-        self.table.item(self.row, 0).setText('Reparando…')
+        self.table.setItem(self.row, 0, status_item('Reparando…', ACCENT))
         self.log.append('── %s' % src)
         self.job = Job(['reparar', src, '--referencia', self.ref.text(), '-o', out], False, self)
         self.job.log.connect(self.log.append)
-        self.job.progress.connect(lambda p: self.bar.setValue(
-            int((self.done_count + p) / self.total * 1000)))
+        self.job.progress.connect(lambda p: self.progress.set(
+            (self.done_count + p) / self.total, 'Clip %d de %d' % (self.done_count + 1, self.total)))
         self.job.clip.connect(self._on_clip)
         self.job.finished.connect(self._on_finished)
         self.job.start()
@@ -729,9 +791,7 @@ class RepairPage(QWidget):
         res.setToolTip(ev['path'])
 
     def _on_finished(self, ok, msg):
-        it = self.table.item(self.row, 0)
-        it.setText('Reparado' if ok else 'Error')
-        it.setForeground(QColor('#7bd88f' if ok else '#ff7b72'))
+        self.table.setItem(self.row, 0, status_item('Reparado' if ok else 'Error', OK if ok else BAD))
         if not ok:
             self.table.item(self.row, 4).setText(msg)
             self.log.append('ERROR: ' + msg)
@@ -739,16 +799,16 @@ class RepairPage(QWidget):
         self._next()
 
 
+# ---------------------------------------------------------------- analizar
+
 class AnalyzePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('page')
         self.setAcceptDrops(True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(32, 26, 32, 22)
+        lay = page_scaffold(self)
         lay.addWidget(page_header('Analizar un clip',
-                                  'Estructura del archivo, si le falta el índice, códec, fps y perfil '
-                                  'de imagen (S-Log3, S-Cinetone, HLG…) leído de los metadatos de Sony.'))
+                                  'Estructura del archivo, si le falta el índice, códec, fps y perfil de '
+                                  'imagen (S-Log3, S-Cinetone, HLG…) leído de los metadatos de Sony.'))
         row = QHBoxLayout()
         self.path = PathRow('Clip MP4 / MXF', mode='file', filter_='Vídeo (*.mp4 *.MP4 *.mxf *.MXF *.mov)')
         row.addWidget(self.path, 1)
@@ -756,10 +816,11 @@ class AnalyzePage(QWidget):
         go.setObjectName('primary')
         go.clicked.connect(self.run)
         row.addWidget(go)
-        lay.addLayout(row)
+        lay.addWidget(card(row))
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setPlaceholderText('Arrastra aquí un clip o elígelo arriba.')
+        self.text.setMinimumHeight(420)
         lay.addWidget(self.text, 1)
         self.thread = None
 
@@ -782,150 +843,140 @@ class AnalyzePage(QWidget):
         self.thread.start()
 
 
+# ---------------------------------------------------------------- herramientas de tarjeta
+
 class CardToolsPage(QWidget):
     """Información, salud, pruebas y reparación de la tarjeta."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('page')
         self.job = None
-        self.card = None
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(32, 26, 32, 22)
+        self.result_text = None
+        lay = page_scaffold(self)
         lay.addWidget(page_header('Herramientas de tarjeta',
                                   'Comprueba si una tarjeta es fiable (falsa, sectores dañados, velocidad '
                                   'real), su vida útil si la informa, y repara el formato o la partición.'))
-        warn = QLabel('⚠  AVISO: la prueba de capacidad, la reparación del sistema de archivos y el '
-                      'formateo escriben en la tarjeta. Después de usarlas, RECUPERAR los vídeos y fotos '
-                      'borrados de esa tarjeta se vuelve IMPOSIBLE. Si hay algo que rescatar, usa antes '
-                      '«Rescatar tarjeta».')
-        warn.setWordWrap(True)
-        warn.setStyleSheet('background: #3a1d20; border: 1px solid #8a3a40; border-radius: 8px; '
-                           'color: #ffb4b4; padding: 10px 12px; font-weight: 600;')
+        warn = QFrame()
+        warn.setObjectName('warn')
+        wl = QHBoxLayout(warn)
+        wl.setContentsMargins(14, 10, 14, 10)
+        wi = QLabel('⚠')
+        wi.setStyleSheet('font-size: 20px; color: #ffb4b4;')
+        wt = QLabel('<b>La prueba de capacidad, la reparación y el formateo escriben en la tarjeta.</b> '
+                    'Después, recuperar los vídeos y fotos borrados de esa tarjeta será imposible. '
+                    'Si hay algo que rescatar, usa antes «Rescatar tarjeta».')
+        wt.setWordWrap(True)
+        wt.setStyleSheet('color: #ffcfcf;')
+        wl.addWidget(wi, 0, Qt.AlignTop)
+        wl.addWidget(wt, 1)
         lay.addWidget(warn)
-        top = QHBoxLayout()
-        top.addWidget(step_label('Tarjeta'))
-        top.addStretch(1)
+
+        head = QHBoxLayout()
+        head.addWidget(section('Tarjeta'))
+        head.addStretch(1)
         refresh = QPushButton('Actualizar')
         refresh.clicked.connect(self.refresh)
-        top.addWidget(refresh)
-        lay.addLayout(top)
-        self.drives = QListWidget()
-        self.drives.setObjectName('drives')
-        self.drives.setMaximumHeight(130)
-        self.drives.itemSelectionChanged.connect(self._selected_changed)
+        head.addWidget(refresh)
+        lay.addLayout(head)
+        self.drives = DriveList(self._selected_changed)
         lay.addWidget(self.drives)
-
         self.info = QLabel('Elige una tarjeta para ver su información.')
         self.info.setObjectName('hint')
         self.info.setWordWrap(True)
         self.info.setTextFormat(Qt.RichText)
-        frame = QFrame()
-        frame.setObjectName('card')
-        fl = QVBoxLayout(frame)
-        fl.setContentsMargins(14, 10, 14, 10)
-        fl.addWidget(self.info)
-        lay.addWidget(frame)
+        self.info_card = card(self.info)
+        lay.addWidget(self.info_card)
 
+        lay.addWidget(section('Herramientas'))
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(6)
-        self.buttons = []
-
-        def add(row, col, text, tip, handler, danger=False):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            if danger:
-                b.setObjectName('danger')
-            b.clicked.connect(handler)
-            grid.addWidget(b, row, col)
-            self.buttons.append(b)
-            return b
-
-        grid.addWidget(step_label('Diagnóstico · no borra nada'), 0, 0, 1, 2)
-        add(1, 0, 'Información y vida útil', 'Modelo, particiones, formato y contadores de desgaste',
-            self.do_info)
-        add(1, 1, 'Prueba de lectura completa', 'Lee toda la tarjeta: sectores ilegibles y zonas lentas',
-            self.do_surface)
-        grid.addWidget(step_label('Prueba de escritura · usa el espacio libre'), 2, 0, 1, 2)
-        add(3, 0, 'Capacidad y velocidad real', 'Detecta tarjetas falsas, datos corruptos y la clase '
-            'de velocidad que cumple de verdad', self.do_capacity)
-        grid.addWidget(step_label('Reparación'), 4, 0, 1, 2)
-        add(5, 0, 'Reparar sistema de archivos', 'chkdsk / diskutil: corrige errores sin borrar',
-            self.do_fsrepair)
-        add(5, 1, 'Formatear y rehacer partición', 'BORRA TODO y deja la tarjeta como nueva '
-            '(alineación y formato SD)', self.do_format, danger=True)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        self.cards = [
+            ActionCard('Información y vida útil', 'Modelo, particiones, formato y desgaste si la tarjeta '
+                       'o el lector lo informan (CFexpress suele hacerlo; SD por USB casi nunca).',
+                       'No borra', OK, 'Consultar', self.do_info),
+            ActionCard('Prueba de lectura completa', 'Lee toda la tarjeta buscando sectores ilegibles y '
+                       'zonas lentas. Pide permiso de Administrador.', 'No borra', OK, 'Iniciar',
+                       self.do_surface),
+            ActionCard('Capacidad y velocidad real', 'Llena el espacio libre y lo verifica sin caché: '
+                       'detecta tarjetas falsas, datos corruptos y la clase real (V30/V60/V90).',
+                       'Sobrescribe lo borrado', WARN, 'Iniciar', self.do_capacity),
+            ActionCard('Reparar sistema de archivos', 'Corrige errores del sistema de archivos (chkdsk / '
+                       'diskutil) sin borrar los archivos visibles.', 'Modifica la tarjeta', WARN,
+                       'Reparar', self.do_fsrepair),
+            ActionCard('Formatear y rehacer partición', 'Deja la tarjeta como nueva: MBR, alineación a 4 MB '
+                       'y FAT32 / exFAT como pide la SD Association.', 'Borra todo', BAD, 'Formatear…',
+                       self.do_format, danger=True),
+        ]
+        for i, c in enumerate(self.cards):
+            grid.addWidget(c, i // 2, i % 2)
         lay.addLayout(grid)
-        lay.addWidget(hint('Solo se muestran unidades extraíbles (tarjetas y lectores). Si la tarjeta '
-                           'tiene material por recuperar, rescátalo ANTES: la prueba de capacidad y el '
-                           'formateo sobrescriben lo borrado.'))
 
         self.status = QLabel('')
-        self.status.setObjectName('step')
+        self.status.setObjectName('cardTitle')
         self.status.setWordWrap(True)
-        lay.addWidget(self.status)
-        row = QHBoxLayout()
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        row.addWidget(self.bar, 1)
+        self.progress = ProgressPanel()
+        stop_row = QHBoxLayout()
+        stop_row.addWidget(self.status, 1)
         self.stop_btn = QPushButton('Detener')
         self.stop_btn.setObjectName('danger')
-        self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(lambda: self.job and self.job.stop())
-        row.addWidget(self.stop_btn)
-        lay.addLayout(row)
+        stop_row.addWidget(self.stop_btn)
         self.log = LogPanel()
-        lay.addWidget(self.log)
+        self.run_card = card(stop_row, self.progress, self.log)
+        self.run_card.setVisible(False)
+        lay.addWidget(self.run_card)
         lay.addStretch(1)
         self.refresh()
 
     # ---- selección
     def refresh(self):
-        self.drives.clear()
-        for d in devices.list_drives():
-            if d['system'] or not d['removable']:
-                continue        # solo tarjetas y lectores: nunca discos ni SSD externos
-            it = QListWidgetItem('%s   %s   ·   %s   ·   %s' % (
-                d['id'], d['name'], d['fs'] or '—', human_size(d['size']) if d['size'] else '—'))
-            it.setData(Qt.UserRole, d)
-            self.drives.addItem(it)
-        self._selected_changed()
+        self.drives.set_drives([d for d in devices.list_drives() if not d['system'] and d['removable']],
+                               'No hay tarjetas conectadas. Solo se muestran unidades extraíbles '
+                               '(tarjetas y lectores), nunca discos ni SSD externos.')
 
     def _sel(self):
-        it = self.drives.currentItem()
-        return it.data(Qt.UserRole) if it else None
+        return self.drives.selected()
+
+    def _busy(self):
+        return bool(self.job and self.job.running)
+
+    def _set_enabled(self):
+        for c in self.cards:
+            c.button.setEnabled(bool(self._sel()) and not self._busy())
 
     def _selected_changed(self):
-        busy = bool(self.job and not self.job.done)
-        for b in self.buttons:
-            b.setEnabled(bool(self._sel()) and not busy)
-        if self._sel() and not busy:
+        self._set_enabled()
+        if self._sel() and not self._busy():
             self.do_info()
 
     # ---- acciones
     def _run(self, args, title, elevate=False):
-        if self.job and not self.job.done:
+        if self._busy():
             return
+        self.current = title
+        self.result_text = None
         self.log.clear()
-        self.bar.setValue(0)
-        self.status.setText(title + ('  —  esperando permiso de Administrador…'
+        self.progress.setVisible(False)
+        self.status.setText(title + ('  ·  esperando permiso de Administrador…'
                                      if elevate and not devices.is_admin() else '…'))
-        for b in self.buttons:
-            b.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.stop_btn.setVisible(True)
+        self.run_card.setVisible(args[0] != 'tarjeta')
         self.job = Job(args, elevate, self)
         self.job.log.connect(self.log.append)
-        self.job.progress.connect(lambda p: self.bar.setValue(int(p * 1000)))
+        self.job.progress.connect(lambda p: self.progress.set(p, '%.0f %%' % (p * 100)))
         self.job.result.connect(self._on_result)
         self.job.finished.connect(self._on_finished)
-        self.current = title
+        self._set_enabled()
         try:
             self.job.start()
         except PermissionError as e:
             self._on_finished(False, str(e))
+        self._set_enabled()
 
     def do_info(self):
-        self._run(['tarjeta', self._sel()['id']], 'Leyendo información')
+        self.info.setText('Leyendo información de %s…' % self._sel()['id'])
+        self._run(['tarjeta', self._sel()['id']], 'Información')
 
     def do_surface(self):
         self._run(['probar-lectura', self._sel()['id']], 'Prueba de lectura completa', elevate=True)
@@ -959,11 +1010,10 @@ class CardToolsPage(QWidget):
 
     def do_fsrepair(self):
         if self._disclaimer('Reparar sistema de archivos', 'La reparación modifica la estructura y'):
-            self._run(['reparar-fs', self._sel()['id'], '--acepto'], 'Reparando sistema de archivos',
+            self._run(['reparar-fs', self._sel()['id'], '--acepto'], 'Reparación del sistema de archivos',
                       elevate=True)
 
     def do_format(self):
-        from PySide6.QtWidgets import QInputDialog
         d = self._sel()
         if not self._disclaimer('Formatear y rehacer partición', 'El formateo BORRA TODO y'):
             return
@@ -972,7 +1022,7 @@ class CardToolsPage(QWidget):
             'Esto BORRA TODO lo que hay en %s (%s, %s) y no se puede deshacer.\n'
             'Escribe %s para confirmar:' % (d['id'], d['name'], human_size(d['size'] or 0), d['id']))
         if ok and text.strip().upper().rstrip('\\') == d['id'].upper().rstrip('\\'):
-            self._run(['formatear', d['id'], '--confirmar', text.strip(), '--acepto'], 'Formateando',
+            self._run(['formatear', d['id'], '--confirmar', text.strip(), '--acepto'], 'Formateo',
                       elevate=True)
         elif ok:
             QMessageBox.information(self, 'Formatear', 'La confirmación no coincide: no se ha borrado nada.')
@@ -981,112 +1031,130 @@ class CardToolsPage(QWidget):
     def _on_result(self, data):
         if 'tarjeta' in data:
             c, h = data['tarjeta'], data['salud']
-            parts = ', '.join('%s a %s MB' % (p.get('letter') or p.get('n'),
-                                               (p.get('offset') or 0) // 1048576)
+            parts = ', '.join('%s a %s MB' % (p.get('letter') or p.get('n'), (p.get('offset') or 0) // 1048576)
                               for p in c.get('partitions', []))
             used = (c['volsize'] or 0) - (c['free'] or 0) if c.get('volsize') else None
             self.info.setText(
-                '<b style="color:#fff">%s</b> · %s · %s<br>%s · %s %s · particiones: %s<br>'
-                'Ocupado: %s de %s<br><b>Vida útil:</b> %s' % (
-                    c['id'], c['model'], human_size(c['size'] or 0), c.get('bus') or '',
+                '<span style="color:#fff;font-size:14px;font-weight:600">%s &nbsp;%s</span>'
+                '&nbsp;&nbsp;<span style="color:%s">%s</span><br>'
+                '%s · %s %s · partición %s · %s usados de %s<br>'
+                '<span style="color:#e6e6e6"><b>Vida útil:</b> %s</span>' % (
+                    c['id'], c['model'], MUTED, human_size(c['size'] or 0), c.get('bus') or '',
                     c.get('style') or '', c.get('fs') or '', parts or '—',
                     human_size(used) if used is not None else '—',
                     human_size(c['volsize']) if c.get('volsize') else '—', h['conclusion']))
         elif 'veredicto' in data:
             v = data['veredicto']
-            text = {'correcta': 'Tarjeta correcta', 'falsa': 'TARJETA FALSA',
-                    'errores': 'Tarjeta con DATOS CORRUPTOS', 'incompleta': 'Prueba incompleta'}[v]
+            text = {'correcta': '✔ Tarjeta correcta', 'falsa': '✖ TARJETA FALSA',
+                    'errores': '✖ Tarjeta con DATOS CORRUPTOS', 'incompleta': 'Prueba incompleta'}[v]
             self.result_text = '%s · escritura %.0f MB/s (mín. %.0f) · lectura %.0f MB/s · clase real: %s' % (
                 text, data['escritura_media'], data['escritura_minima'], data['lectura_media'],
                 data.get('clase') or 'ninguna')
         elif 'zonas_ilegibles' in data:
             bad = data['zonas_ilegibles']
-            self.result_text = ('%d zonas ilegibles (%s) · ' % (len(bad), human_size(data['bytes_ilegibles']))
-                                if bad else 'Sin sectores dañados · ') + \
-                'lectura media %.0f MB/s' % data.get('lectura_media', 0)
+            self.result_text = ('✖ %d zonas ilegibles (%s)' % (len(bad), human_size(data['bytes_ilegibles']))
+                                if bad else '✔ Sin sectores dañados') + \
+                ' · lectura media %.0f MB/s, mínima %.0f MB/s' % (data.get('lectura_media', 0),
+                                                                   data.get('lectura_min', 0))
         elif 'fs' in data:
-            self.result_text = 'Formateada en %s (clúster %s). Formatéala también en la cámara.' % (
+            self.result_text = '✔ Formateada en %s (clúster %s). Formatéala también en la cámara.' % (
                 data['fs'], data['cluster'])
 
     def _on_finished(self, ok, msg):
-        self.stop_btn.setEnabled(False)
-        for b in self.buttons:
-            b.setEnabled(bool(self._sel()))
-        summary = getattr(self, 'result_text', None)
-        self.result_text = None
+        self.stop_btn.setVisible(False)
+        self._set_enabled()
+        summary, self.result_text = self.result_text, None
+        if self.current == 'Información':
+            if not ok:
+                self.info.setText('No se pudo leer la información: %s' % msg)
+            return
         if ok:
-            self.bar.setValue(1000)
+            self.progress.set(1.0, '100 %')
             self.status.setText('%s: %s' % (self.current, summary) if summary else self.current + ': hecho.')
         else:
             self.status.setText('%s: no se pudo completar. %s' % (self.current, msg))
 
 
+# ---------------------------------------------------------------- acerca de
+
 class AboutPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('page')
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(32, 26, 32, 22)
+        lay = page_scaffold(self)
+        top = QHBoxLayout()
+        top.setSpacing(20)
         mark = QLabel()
-        mark.setPixmap(logo_pixmap(96))
-        lay.addWidget(mark)
-        lay.addWidget(page_header('MD55 Rescue %s' % __version__,
-                                  'Recuperación de vídeo para cámaras Sony: XAVC S, XAVC HS, XAVC S-I '
-                                  'y XAVC en MXF. Copia los datos originales sin recodificar.'))
-        txt = QLabel(
-            '<p><b>Buenas prácticas</b></p>'
-            '<ul>'
+        mark.setPixmap(logo_pixmap(84))
+        top.addWidget(mark, 0, Qt.AlignTop)
+        top.addWidget(page_header('MD55 Rescue %s' % __version__,
+                                  'Recuperación de vídeo y fotos para cámaras Sony: XAVC S / HS / S-I, MXF, '
+                                  'RAW (ARW), HEIF y JPG. Copia los datos originales sin recodificar.'), 1)
+        lay.addLayout(top)
+        tips = QLabel(
+            '<p style="color:#fff"><b>Buenas prácticas</b></p><ul style="color:#c9ccd3">'
             '<li>Deja de grabar en la tarjeta afectada en cuanto notes el problema.</li>'
             '<li>Guarda siempre lo recuperado en otro disco.</li>'
             '<li>Si el sistema ofrece formatear la tarjeta, pulsa Cancelar.</li>'
-            '<li>Para reparar, graba un clip de referencia con la misma cámara y configuración.</li>'
-            '</ul>'
-            '<p><b>Límites</b>: un formateo completo (sobrescritura) no es recuperable; los clips muy '
-            'fragmentados pueden salir incompletos.</p>')
-        txt.setWordWrap(True)
-        txt.setTextFormat(Qt.RichText)
-        lay.addWidget(txt)
+            '<li>Cuantas menos veces conectes la tarjeta antes de rescatarla, mejor: el sistema escribe '
+            'en ella al conectarla.</li>'
+            '<li>Para reparar un clip, graba uno de referencia con la misma cámara y configuración.</li></ul>'
+            '<p style="color:#fff"><b>Límites</b></p><p style="color:#c9ccd3">Un formateo completo '
+            '(sobrescritura) no es recuperable. Lo que se haya sobrescrito después de borrar o formatear '
+            'tampoco. Los archivos muy fragmentados pueden salir incompletos.</p>')
+        tips.setWordWrap(True)
+        tips.setTextFormat(Qt.RichText)
+        lay.addWidget(card(tips, margins=(20, 8, 20, 12)))
         lay.addStretch(1)
 
 
+# ---------------------------------------------------------------- ventana
+
 class MainWindow(QMainWindow):
+    PAGES = [('rescue', 'Rescatar tarjeta'), ('repair', 'Reparar clip'), ('analyze', 'Analizar clip'),
+             ('tools', 'Herramientas de tarjeta'), ('about', 'Acerca de')]
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('MD55 Rescue')
         self.setWindowIcon(app_icon())
-        self.resize(1180, 780)
-        self.setMinimumSize(960, 640)
+        self.resize(1200, 820)
+        self.setMinimumSize(980, 660)
         central = QWidget()
         lay = QHBoxLayout(central)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         side = QWidget()
-        side.setFixedWidth(230)
-        side.setStyleSheet('background: #101216;')
+        side.setObjectName('side')
+        side.setFixedWidth(236)
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(0, 22, 0, 16)
+        sl.setContentsMargins(0, 24, 0, 18)
+        sl.setSpacing(14)
         brand = QHBoxLayout()
-        brand.setContentsMargins(22, 0, 12, 10)
+        brand.setContentsMargins(22, 0, 12, 8)
         brand.setSpacing(10)
         mark = QLabel()
-        mark.setPixmap(logo_pixmap(34))
+        mark.setPixmap(logo_pixmap(32))
         name = QLabel('MD55 Rescue')
-        name.setStyleSheet('font-size: 18px; font-weight: 700; color: #ffffff;')
+        name.setStyleSheet('font-size: 17px; font-weight: 700; color: #ffffff;')
         brand.addWidget(mark)
         brand.addWidget(name)
         brand.addStretch(1)
         sl.addLayout(brand)
         self.nav = QListWidget()
         self.nav.setObjectName('nav')
-        for name in ('Rescatar tarjeta', 'Reparar clip', 'Analizar clip', 'Herramientas de tarjeta',
-                     'Acerca de'):
-            self.nav.addItem(name)
+        self.nav.setIconSize(QSize(20, 20))
+        for key, label in self.PAGES:
+            self.nav.addItem(QListWidgetItem(uikit.nav_icon(key), '  ' + label))
         sl.addWidget(self.nav, 1)
-        adm = QLabel('  Permisos: Administrador' if devices.is_admin() else
-                     '  Se pedirá permiso al leer la tarjeta')
-        adm.setObjectName('hint')
-        adm.setStyleSheet('padding-left: 14px;')
-        sl.addWidget(adm)
+        perm = QLabel(('●  Con permisos de Administrador' if devices.is_admin() else
+                       '●  Pedirá permiso al leer la tarjeta'))
+        perm.setObjectName('hint')
+        perm.setContentsMargins(22, 0, 0, 0)
+        ver = QLabel('Versión %s' % __version__)
+        ver.setObjectName('hint')
+        ver.setContentsMargins(22, 0, 0, 0)
+        sl.addWidget(perm)
+        sl.addWidget(ver)
         self.pages = QStackedWidget()
         for p in (RescuePage(), RepairPage(), AnalyzePage(), CardToolsPage(), AboutPage()):
             self.pages.addWidget(p)
@@ -1107,7 +1175,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName('MD55 Rescue')
     app.setStyle('Fusion')
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(qss())
     w = MainWindow()
     w.show()
     return app.exec()

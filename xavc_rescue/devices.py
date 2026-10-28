@@ -25,12 +25,14 @@ def _win_drives():
         if not k32.GetVolumeInformationW(root, label, 261, None, None, None, fs, 261):
             label.value, fs.value = '', '?'
         total = ctypes.c_ulonglong(0)
-        k32.GetDiskFreeSpaceExW(root, None, ctypes.byref(total), None)
+        free = ctypes.c_ulonglong(0)
+        ok = k32.GetDiskFreeSpaceExW(root, None, ctypes.byref(total), ctypes.byref(free))
         out.append({
             'id': letter,
-            'name': label.value or ('Unidad extraíble' if dtype == 2 else 'Disco'),
+            'name': label.value or ('Tarjeta / unidad extraíble' if dtype == 2 else 'Disco'),
             'fs': fs.value,
             'size': total.value,
+            'used': total.value - free.value if ok else None,
             'removable': dtype == 2,
             'system': letter == system,
         })

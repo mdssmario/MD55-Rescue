@@ -278,7 +278,7 @@ def summary(path):
     if date:
         info['fecha'] = date[:16].replace(':', '-', 2)
     ext = path.rsplit('.', 1)[-1].upper()
-    info['codec'] = {'ARW': 'RAW Sony (ARW)', 'DNG': 'RAW DNG', 'TIF': 'TIFF', 'HIF': 'HEIF (HIF)',
+    info['codec'] = {'ARW': 'RAW ARW', 'DNG': 'RAW DNG', 'TIF': 'TIFF', 'HIF': 'HEIF',
                      'HEIC': 'HEIF', 'AVIF': 'AVIF', 'JPG': 'JPEG'}.get(ext, ext)
     if model:
         info['codec'] += ' · ' + model
