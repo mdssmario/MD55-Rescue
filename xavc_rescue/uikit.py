@@ -126,6 +126,10 @@ QScrollBar::handle:vertical:hover { background: #454b57; }
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { background: none; height: 0; width: 0; }
 QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
 QScrollBar::handle:horizontal { background: #353a45; border-radius: 4px; min-width: 30px; }
+QComboBox { background: #1b1e25; border: 1px solid #2f343e; border-radius: 7px; padding: 6px 10px; }
+QComboBox:hover { border-color: #3a404b; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView { background: #1b1e25; border: 1px solid #3a404b; selection-background-color: #2a2216; outline: 0; }
 QToolTip { background: #22262e; color: #e6e6e6; border: 1px solid #3a404b; padding: 6px; border-radius: 6px; }
 QMessageBox { background: #1b1e25; }
 QToolButton { border: none; color: %(muted)s; }

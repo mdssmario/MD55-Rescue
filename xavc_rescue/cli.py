@@ -95,10 +95,10 @@ def _explore_command(args, sink, log, progress, on_clip, should_stop):
 
     def ui_selection(items):
         sink.event('scan_done', count=len(items))
-        ids = sink.wait_selection()
-        if ids is not None:
-            sink.event('phase', phase='extract', count=len(ids))
-        return ids
+        selection = sink.wait_selection()
+        if selection is not None:
+            sink.event('phase', phase='extract', count=len(selection.get('ids', [])))
+        return selection
 
     carve.explore(args.origen, args.salida, ui_selection if sink else console_selection,
                   log=log, progress=progress, should_stop=should_stop,

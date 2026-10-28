@@ -1,12 +1,14 @@
 """Interfaz de escritorio (Qt / PySide6) para Windows y macOS."""
+import datetime
 import os
+import shutil
 import sys
 import time
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -18,6 +20,49 @@ from .uikit import (ACCENT, BAD, MUTED, OK, WARN, ActionCard, DriveList, human_s
                     svg_pixmap)
 
 PHOTO_KINDS = ('raw', 'heif', 'jpg')
+SORT_ROLE = Qt.UserRole + 3
+
+CAMERA_NAMES = {
+    'ILCE-1': 'A1', 'ILCE-1M2': 'A1 II', 'ILCE-9M2': 'A9 II', 'ILCE-9M3': 'A9 III',
+    'ILCE-7M3': 'A7 III', 'ILCE-7M4': 'A7 IV', 'ILCE-7SM2': 'A7S II', 'ILCE-7SM3': 'A7S III',
+    'ILCE-7RM3': 'A7R III', 'ILCE-7RM4': 'A7R IV', 'ILCE-7RM4A': 'A7R IVA', 'ILCE-7RM5': 'A7R V',
+    'ILCE-7C': 'A7C', 'ILCE-7CM2': 'A7C II', 'ILCE-7CR': 'A7CR', 'ILCE-6700': 'A6700',
+    'ILME-FX3': 'FX3', 'ILME-FX3A': 'FX3', 'ILME-FX30': 'FX30', 'ILME-FX6': 'FX6', 'ILME-FX6V': 'FX6',
+    'ZV-E1': 'ZV-E1', 'ZV-E10M2': 'ZV-E10 II',
+}
+MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+
+
+def camera_name(model):
+    return CAMERA_NAMES.get((model or '').strip(), (model or '').strip() or '—')
+
+
+def day_label(day):
+    try:
+        y, m, d = day.split('-')
+        return '%d %s %s' % (int(d), MONTHS[int(m) - 1], y)
+    except (ValueError, IndexError):
+        return day
+
+
+def parse_when(stamp):
+    try:
+        return datetime.datetime.strptime((stamp or '')[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return None
+
+
+class SortItem(QTableWidgetItem):
+    """Celda que ordena por un valor propio (tamaño, duración, fecha) si lo tiene."""
+
+    def __lt__(self, other):
+        a, b = self.data(SORT_ROLE), other.data(SORT_ROLE)
+        if a is not None and b is not None:
+            try:
+                return a < b
+            except TypeError:
+                pass
+        return super().__lt__(other)
 
 
 def qss():
@@ -123,9 +168,9 @@ class Job(QObject):
         if self.reader and not self.done:
             self.reader.request_stop()
 
-    def send_selection(self, ids):
+    def send_selection(self, ids, **options):
         if self.reader and not self.done:
-            self.reader.send_selection(ids)
+            self.reader.send_selection(ids, **options)
 
     def _dispatch(self, events):
         """Reparte los eventos leídos. True si ha llegado el final."""
@@ -331,7 +376,7 @@ def status_item(text, color):
 # ---------------------------------------------------------------- rescatar tarjeta
 
 class RescuePage(QWidget):
-    COLS = ['', 'Archivo', 'Duración', 'Formato', 'Perfil', 'Tamaño', 'Estado']
+    COLS = ['', 'Archivo', 'Cámara', 'Duración', 'Formato', 'Perfil', 'Tamaño', 'Estado']
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -431,6 +476,8 @@ class RescuePage(QWidget):
                                and (self.want_video.isChecked() or self.want_photo.isChecked()))
 
     # ---- exploración, selección y recuperación
+    C_CHECK, C_NAME, C_CAM, C_DUR, C_FMT, C_PROF, C_SIZE, C_STATE = range(8)
+
     def _run_view(self):
         w = QWidget()
         w.setObjectName('page')
@@ -465,16 +512,25 @@ class RescuePage(QWidget):
 
         # filtros y selección
         bar = QHBoxLayout()
-        bar.setSpacing(18)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(16)
         self.f_video = QCheckBox('Vídeos')
         self.f_photo = QCheckBox('Fotos')
-        self.f_incomplete = QCheckBox('Mostrar incompletos')
-        for cb in (self.f_video, self.f_photo, self.f_incomplete):
-            cb.setChecked(True)
+        self.f_thumbs = QCheckBox('Miniaturas')
+        self.f_incomplete = QCheckBox('Incompletos')
+        for cb, on in ((self.f_video, True), (self.f_photo, True), (self.f_thumbs, False),
+                       (self.f_incomplete, True)):
+            cb.setChecked(on)
             cb.toggled.connect(self._apply_filter)
             bar.addWidget(cb)
+        self.f_thumbs.setToolTip('JPG pequeños que la cámara crea para cada clip (no son fotos)')
+        self.f_date = QComboBox()
+        self.f_date.setMinimumWidth(190)
+        self.f_date.addItem('Todas las fechas', '')
+        self.f_date.currentIndexChanged.connect(self._apply_filter)
+        bar.addWidget(self.f_date)
         bar.addStretch(1)
-        self.sel_all = QPushButton('Seleccionar todo')
+        self.sel_all = QPushButton('Seleccionar visibles')
         self.sel_all.clicked.connect(lambda: self._check_visible(True))
         self.sel_none = QPushButton('Ninguno')
         self.sel_none.clicked.connect(lambda: self._check_visible(False))
@@ -482,7 +538,6 @@ class RescuePage(QWidget):
         bar.addWidget(self.sel_none)
         self.filter_bar = QWidget()
         self.filter_bar.setLayout(bar)
-        bar.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.filter_bar)
 
         self.table = QTableWidget(0, len(self.COLS))
@@ -500,19 +555,21 @@ class RescuePage(QWidget):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         h = self.table.horizontalHeader()
         h.setMinimumSectionSize(34)
-        for col, width in ((0, 62), (2, 70), (3, 200), (4, 160), (5, 80), (6, 160)):
+        h.setSortIndicatorShown(True)
+        for col, width in ((self.C_CHECK, 62), (self.C_CAM, 76), (self.C_DUR, 66), (self.C_FMT, 172),
+                           (self.C_PROF, 150), (self.C_SIZE, 78), (self.C_STATE, 128)):
             h.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, width)
-        h.setSectionResizeMode(1, QHeaderView.Stretch)
+        h.setSectionResizeMode(self.C_NAME, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_row)
         self.table.itemSelectionChanged.connect(self._show_preview)
         self.table.itemChanged.connect(self._selection_changed)
         lay.addWidget(self.table, 1)
 
-        # vista previa de la foto seleccionada, debajo de la tabla
+        # vista previa (foto, o la miniatura de la cámara en los vídeos), debajo de la tabla
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setFixedSize(240, 160)
+        self.preview.setFixedSize(240, 136)
         self.preview.setObjectName('hint')
         self.preview_info = QLabel()
         self.preview_info.setWordWrap(True)
@@ -526,8 +583,12 @@ class RescuePage(QWidget):
         lay.addWidget(self.preview_card)
 
         foot = QHBoxLayout()
+        foot.setSpacing(14)
         self.log = LogPanel()
         foot.addWidget(self.log, 1, Qt.AlignTop)
+        self.by_date = QCheckBox('Separar en carpetas por fecha')
+        self.by_date.setToolTip('Guarda cada archivo en una subcarpeta AAAA-MM-DD según la fecha de la cámara')
+        foot.addWidget(self.by_date, 0, Qt.AlignTop)
         self.sel_label = QLabel('')
         self.sel_label.setObjectName('hint')
         foot.addWidget(self.sel_label, 0, Qt.AlignTop)
@@ -542,12 +603,21 @@ class RescuePage(QWidget):
         """scan: explorando · choose: eligiendo · extract: recuperando · done: terminado."""
         self.mode = mode
         self.stop_btn.setVisible(mode == 'scan')
+        self.stop_btn.setEnabled(True)
         self.cancel_btn.setVisible(mode in ('scan', 'choose'))
         self.open_btn.setVisible(mode in ('extract', 'done'))
         self.new_btn.setVisible(mode == 'done')
         self.filter_bar.setVisible(mode in ('scan', 'choose'))
-        self.recover_btn.setVisible(mode in ('scan', 'choose'))
-        self.sel_label.setVisible(mode in ('scan', 'choose'))
+        for wdg in (self.recover_btn, self.sel_label, self.by_date):
+            wdg.setVisible(mode in ('scan', 'choose'))
+        # ordenar por columnas una vez terminada la exploración (mientras, por orden de hallazgo);
+        # por defecto, cronológico
+        sortable = mode in ('choose', 'done')
+        if sortable and not self.table.isSortingEnabled():
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(self.C_NAME, Qt.AscendingOrder)
+        elif not sortable:
+            self.table.setSortingEnabled(False)
         self._selection_changed()
 
     def start(self):
@@ -570,14 +640,20 @@ class RescuePage(QWidget):
                                      if cb.isChecked())]
         elevate = devices.is_device(d['id'])
         self.source_size = d.get('size') or 0
+        self.table.setSortingEnabled(False)
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         self.table.blockSignals(False)
-        self.rows = {}
+        self.f_date.blockSignals(True)
+        self.f_date.clear()
+        self.f_date.addItem('Todas las fechas', '')
+        self.f_date.blockSignals(False)
+        self.days = {}
+        self.thumbs = []           # (instante, ruta de vista previa) de las miniaturas
         self.preview_card.setVisible(False)
         self.log.clear()
         self.progress.setVisible(False)
-        self.found_v = self.found_p = 0
+        self.found = {'video': 0, 'photo': 0, 'thumb': 0, 'video_bytes': 0}
         self.saved_v = self.saved_p = 0
         self.source_name = d['id'] if not d.get('image') else os.path.basename(d['id'])
         self.run_title.setText('Explorando %s' % self.source_name)
@@ -614,7 +690,7 @@ class RescuePage(QWidget):
             self.t0 = time.monotonic()
             if self.mode == 'scan':
                 self.run_sub.setText('Leyendo la tarjeta sin modificar nada. Puedes ir marcando lo que '
-                                     'quieras recuperar.')
+                                     'quieras recuperar; «Detener exploración» permite elegir ya.')
         self.log.append(msg)
 
     def _on_progress(self, p):
@@ -633,8 +709,12 @@ class RescuePage(QWidget):
         self.progress.set(p, '   ·   '.join(parts))
 
     def _found_text(self):
-        return '%d vídeo%s · %d foto%s encontrados' % (
-            self.found_v, '' if self.found_v == 1 else 's', self.found_p, '' if self.found_p == 1 else 's')
+        f = self.found
+        parts = ['%d vídeo%s (%s)' % (f['video'], '' if f['video'] == 1 else 's', human_size(f['video_bytes'])),
+                 '%d foto%s' % (f['photo'], '' if f['photo'] == 1 else 's')]
+        if f['thumb']:
+            parts.append('%d miniatura%s' % (f['thumb'], '' if f['thumb'] == 1 else 's'))
+        return ' · '.join(parts)
 
     # ---- eventos del motor
     def _on_event(self, ev):
@@ -642,11 +722,11 @@ class RescuePage(QWidget):
         if t == 'item':
             self._add_item(ev)
         elif t == 'scan_done':
-            self.run_title.setText('Encontrados en %s: %s' % (self.source_name, self._found_text()
-                                                              .replace(' encontrados', '')))
-            self.run_sub.setText('Marca lo que quieras recuperar y pulsa «Recuperar seleccionados». '
-                                 'Todavía no se ha guardado nada.')
+            self.run_title.setText('Encontrado en %s' % self.source_name)
+            self.run_sub.setText('%s. Marca lo que quieras recuperar y pulsa «Recuperar seleccionados». '
+                                 'Todavía no se ha guardado nada.' % self._found_text())
             self.progress.set(1.0, '100 %   ·   ' + self._found_text())
+            self._refresh_days()
             self._set_mode('choose')
         elif t == 'phase' and ev.get('phase') == 'extract':
             self.t0 = time.monotonic()
@@ -655,40 +735,87 @@ class RescuePage(QWidget):
 
     def _add_item(self, ev):
         photo = ev.get('kind') in PHOTO_KINDS
-        if photo:
-            self.found_p += 1
+        thumb = bool(ev.get('thumb'))
+        if thumb:
+            self.found['thumb'] += 1
+            if ev.get('fecha_seg') and ev.get('preview'):
+                self.thumbs.append((ev['fecha_seg'], ev['preview']))
+        elif photo:
+            self.found['photo'] += 1
         else:
-            self.found_v += 1
+            self.found['video'] += 1
+            self.found['video_bytes'] += ev.get('size') or 0
+        day = (ev.get('fecha') or '')[:10]
+        if not thumb:
+            if day not in self.days:
+                self.days[day] = 0
+                self._refresh_days()
+            self.days[day] += 1
         r = self.table.rowCount()
         self.table.blockSignals(True)
         self.table.insertRow(r)
-        check = QTableWidgetItem()
+        check = SortItem()
         check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-        check.setCheckState(Qt.Checked if ev.get('complete') else Qt.Unchecked)
-        check.setIcon(QIcon(svg_pixmap('photo' if photo else 'video', ACCENT if photo else '#7aa7ff', 18)))
+        check.setCheckState(Qt.Checked if ev.get('complete') and not thumb else Qt.Unchecked)
+        icon = 'video' if not photo else 'image' if thumb else 'photo'
+        check.setIcon(QIcon(svg_pixmap(icon, '#7aa7ff' if not photo else MUTED if thumb else ACCENT, 18)))
         check.setData(Qt.UserRole, ev)
-        name = QTableWidgetItem(ev.get('name', ''))
+        check.setData(SORT_ROLE, 0 if not photo else 2 if thumb else 1)
+        check.setToolTip('Vídeo' if not photo else 'Miniatura de la cámara' if thumb else 'Foto')
+        name = SortItem(ev.get('name', ''))
         name.setToolTip(ev.get('note', ''))
-        cells = [check, name, QTableWidgetItem(human_time(ev.get('duracion')) if not photo else '—'),
-                 QTableWidgetItem(ev.get('codec') or '—'), QTableWidgetItem(ev.get('perfil') or '—'),
-                 QTableWidgetItem(human_size(ev.get('size') or 0)),
-                 status_item('Encontrado' if ev.get('complete') else 'Incompleto',
-                             MUTED if ev.get('complete') else WARN)]
+        name.setData(SORT_ROLE, ev.get('fecha_seg') or ev.get('name', ''))
+        cam = SortItem(camera_name(ev.get('camara')))
+        cam.setToolTip(ev.get('camara') or '')
+        dur = SortItem(human_time(ev.get('duracion')) if not photo else '—')
+        dur.setData(SORT_ROLE, ev.get('duracion') or 0)
+        size = SortItem(human_size(ev.get('size') or 0))
+        size.setData(SORT_ROLE, ev.get('size') or 0)
+        if thumb:
+            state = status_item('Miniatura', '#5f646d')
+        else:
+            state = status_item('Encontrado' if ev.get('complete') else 'Incompleto',
+                                MUTED if ev.get('complete') else WARN)
+        cells = [check, name, cam, dur, SortItem(ev.get('codec') or '—'), SortItem(ev.get('perfil') or '—'),
+                 size, state]
         for c, it in enumerate(cells):
             self.table.setItem(r, c, it)
-        self.rows[ev['id']] = r
         self._apply_filter_row(r)
         self.table.blockSignals(False)
         self._selection_changed()
 
-    def _apply_filter_row(self, r):
-        ev = self.table.item(r, 0).data(Qt.UserRole)
-        photo = ev.get('kind') in PHOTO_KINDS
-        hidden = ((photo and not self.f_photo.isChecked()) or (not photo and not self.f_video.isChecked())
-                  or (not ev.get('complete') and not self.f_incomplete.isChecked()))
-        self.table.setRowHidden(r, hidden)
+    def _refresh_days(self):
+        current = self.f_date.currentData()
+        self.f_date.blockSignals(True)
+        self.f_date.clear()
+        self.f_date.addItem('Todas las fechas', '')
+        for day in sorted(self.days, reverse=True):
+            label = day_label(day) if day else 'Sin fecha'
+            self.f_date.addItem('%s · %d' % (label, self.days[day]), day or '-')
+        idx = self.f_date.findData(current)
+        self.f_date.setCurrentIndex(max(0, idx))
+        self.f_date.blockSignals(False)
 
-    def _apply_filter(self):
+    def _row_of(self, item_id):
+        for r in range(self.table.rowCount()):
+            ev = self.table.item(r, self.C_CHECK).data(Qt.UserRole)
+            if ev and ev.get('id') == item_id:
+                return r
+        return None
+
+    def _apply_filter_row(self, r):
+        ev = self.table.item(r, self.C_CHECK).data(Qt.UserRole)
+        photo = ev.get('kind') in PHOTO_KINDS
+        thumb = bool(ev.get('thumb'))
+        day = self.f_date.currentData()
+        hidden = ((thumb and not self.f_thumbs.isChecked())
+                  or (photo and not thumb and not self.f_photo.isChecked())
+                  or (not photo and not self.f_video.isChecked())
+                  or (not ev.get('complete') and not self.f_incomplete.isChecked())
+                  or (day and (ev.get('fecha') or '')[:10] != ('' if day == '-' else day)))
+        self.table.setRowHidden(r, bool(hidden))
+
+    def _apply_filter(self, *_):
         for r in range(self.table.rowCount()):
             self._apply_filter_row(r)
         self._selection_changed()
@@ -697,7 +824,7 @@ class RescuePage(QWidget):
         self.table.blockSignals(True)
         for r in range(self.table.rowCount()):
             if not self.table.isRowHidden(r):
-                self.table.item(r, 0).setCheckState(Qt.Checked if on else Qt.Unchecked)
+                self.table.item(r, self.C_CHECK).setCheckState(Qt.Checked if on else Qt.Unchecked)
         self.table.blockSignals(False)
         self._selection_changed()
 
@@ -705,7 +832,7 @@ class RescuePage(QWidget):
         """Elementos marcados y visibles (lo oculto por un filtro no se recupera)."""
         out = []
         for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
+            it = self.table.item(r, self.C_CHECK)
             if it and it.checkState() == Qt.Checked and not self.table.isRowHidden(r):
                 out.append(it.data(Qt.UserRole))
         return out
@@ -724,25 +851,39 @@ class RescuePage(QWidget):
         chosen = self._chosen()
         if not chosen or not self.job:
             return
+        need = sum(e.get('size') or 0 for e in chosen)
+        try:
+            free = shutil.disk_usage(self.out_dir).free
+        except OSError:
+            free = None
+        if free is not None and free < need + 64 * 1024 * 1024:
+            QMessageBox.warning(self, 'Sin espacio suficiente',
+                                'Lo seleccionado ocupa %s y en el destino solo hay %s libres.\n\n'
+                                'Elige menos archivos o cambia la carpeta de destino (Nueva búsqueda).'
+                                % (human_size(need), human_size(free)))
+            return
         ids = {e['id'] for e in chosen}
         self.extract_count = len(chosen)
-        self.extract_bytes = sum(e.get('size') or 0 for e in chosen)
+        self.extract_bytes = need
         self.table.blockSignals(True)
-        for item_id, r in self.rows.items():
-            it = self.table.item(r, 0)
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, self.C_CHECK)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if item_id in ids:
-                self.table.setItem(r, 6, status_item('Pendiente', MUTED))
+            ev = it.data(Qt.UserRole)
+            if ev['id'] in ids:
+                self.table.setItem(r, self.C_STATE, status_item('Pendiente', MUTED))
             else:
-                self.table.setItem(r, 6, status_item('Omitido', '#5f646d'))
+                self.table.setItem(r, self.C_STATE, status_item('Omitido', '#5f646d'))
+                self.table.setRowHidden(r, True)
         self.table.blockSignals(False)
         self.run_title.setText('Recuperando %d archivo%s' % (len(chosen), '' if len(chosen) == 1 else 's'))
-        self.run_sub.setText('Guardando en %s' % self.out_dir)
-        self.job.send_selection(sorted(ids))
+        self.run_sub.setText('Guardando en %s%s' % (self.out_dir, ' (una carpeta por fecha)'
+                                                   if self.by_date.isChecked() else ''))
+        self.job.send_selection(sorted(ids), por_fecha=self.by_date.isChecked())
         self._set_mode('extract')
 
     def _on_saved(self, ev):
-        r = self.rows.get(ev.get('id'))
+        r = self._row_of(ev.get('id'))
         if r is None:
             return
         if ev.get('kind') in PHOTO_KINDS:
@@ -754,46 +895,61 @@ class RescuePage(QWidget):
         elif ev.get('note', '').startswith('reparado'):
             state, color = 'Reparado', OK
         else:
-            state, color = 'Recuperado' if ev.get('complete') else 'Guardado incompleto', \
-                OK if ev.get('complete') else WARN
-        it = self.table.item(r, 0)
-        data = dict(it.data(Qt.UserRole), path=ev.get('path'))
-        it.setData(Qt.UserRole, data)
-        self.table.item(r, 1).setText(os.path.basename(ev.get('path', '')))
-        self.table.item(r, 1).setToolTip(ev.get('path', ''))
-        self.table.setItem(r, 6, status_item(state, color))
+            state, color = ('Recuperado', OK) if ev.get('complete') else ('Guardado incompleto', WARN)
+        it = self.table.item(r, self.C_CHECK)
+        it.setData(Qt.UserRole, dict(it.data(Qt.UserRole), path=ev.get('path')))
+        self.table.item(r, self.C_NAME).setText(os.path.basename(ev.get('path', '')))
+        self.table.item(r, self.C_NAME).setToolTip(ev.get('path', ''))
+        self.table.setItem(r, self.C_STATE, status_item(state, color))
         rows = self.table.selectionModel().selectedRows()
         if rows and rows[0].row() == r:
             self._show_preview()
 
     def _open_row(self, r, _c):
-        ev = self.table.item(r, 0).data(Qt.UserRole) or {}
+        ev = self.table.item(r, self.C_CHECK).data(Qt.UserRole) or {}
         if ev.get('path'):
             open_path(ev['path'])
+
+    def _thumb_for(self, ev):
+        """Miniatura de la cámara de un clip: la de hora más cercana (±3 s) al inicio del clip."""
+        when = parse_when(ev.get('fecha_seg'))
+        if when is None:
+            return None
+        best = None
+        for stamp, path in self.thumbs:
+            t = parse_when(stamp)
+            if t is not None and abs((t - when).total_seconds()) <= 3:
+                if best is None or abs((t - when).total_seconds()) < best[0]:
+                    best = (abs((t - when).total_seconds()), path)
+        return best[1] if best else None
 
     def _show_preview(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        ev = self.table.item(rows[0].row(), 0).data(Qt.UserRole) or {}
-        if ev.get('kind') not in PHOTO_KINDS:
-            self.preview_card.setVisible(False)
-            return
-        pm = None
-        if ev.get('preview') and os.path.exists(ev['preview']):
-            pm = QPixmap(ev['preview'])
-            if not pm.isNull():
-                pm = pm.scaled(240, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        ev = self.table.item(rows[0].row(), self.C_CHECK).data(Qt.UserRole) or {}
+        photo = ev.get('kind') in PHOTO_KINDS
+        source = ev.get('preview') if photo else self._thumb_for(ev)
+        pm = QPixmap(source) if source and os.path.exists(source) else None
         if pm is None or pm.isNull():
+            self.preview.setPixmap(QPixmap())
             self.preview.setText('Sin vista previa')
         else:
-            self.preview.setPixmap(pm)
-        where = ev.get('path') or 'Aún no recuperada'
+            self.preview.setPixmap(pm.scaled(240, 136, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        details = [ev.get('codec') or '—', ev.get('perfil'), camera_name(ev.get('camara')),
+                   (ev.get('fecha_seg') or ev.get('fecha') or '—'), human_size(ev.get('size') or 0)]
+        if not photo:
+            details.insert(1, human_time(ev.get('duracion')))
+        where = ev.get('path') or ('Miniatura que la cámara crea para un clip; no es una foto.'
+                                   if ev.get('thumb') else 'Aún no recuperado')
+        note = '' if photo else ('Imagen: miniatura de la cámara' if source else
+                                 'Este clip no tiene miniatura de la cámara en la tarjeta')
         self.preview_info.setText(
             '<span style="color:#fff;font-size:14px;font-weight:600">%s</span><br>'
-            '<span style="color:%s">%s · %s · %s</span><br><br><span style="color:%s">%s</span>'
-            % (os.path.basename(ev.get('path') or ev.get('name', '')), MUTED, ev.get('codec') or '—',
-               ev.get('fecha') or '—', human_size(ev.get('size') or 0), MUTED, where))
+            '<span style="color:%s">%s</span><br><br><span style="color:%s">%s</span>'
+            '<br><span style="color:#6b707a">%s</span>'
+            % (os.path.basename(ev.get('path') or ev.get('name', '')), MUTED,
+               ' · '.join(x for x in details if x and x != '—' or x == details[0]), MUTED, where, note))
         self.preview_card.setVisible(True)
 
     def _on_finished(self, ok, msg):

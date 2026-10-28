@@ -36,8 +36,8 @@ class EventFile:
         self._write(dict(data, t=event_type))
 
     def wait_selection(self, timeout=12 * 3600):
-        """Espera a que la interfaz escriba '<archivo>.seleccion' (lista de ids en JSON).
-        Devuelve la lista, o None si se pide parar o se agota el tiempo."""
+        """Espera a que la interfaz escriba '<archivo>.seleccion' ({"ids": [...], opciones}).
+        Devuelve ese diccionario, o None si se pide parar o se agota el tiempo."""
         sel_path = self.path + '.seleccion'
         try:
             os.remove(self.stop_path)       # el «Detener» de la exploración ya se atendió
@@ -50,7 +50,7 @@ class EventFile:
             if os.path.exists(sel_path):
                 try:
                     with open(sel_path, encoding='utf-8') as f:
-                        return json.load(f).get('ids', [])
+                        return json.load(f)
                 except (OSError, ValueError):
                     pass            # aún se está escribiendo
             time.sleep(0.4)
@@ -94,8 +94,8 @@ class EventReader:
         with open(self.path + '.stop', 'w') as f:
             f.write('stop')
 
-    def send_selection(self, ids):
+    def send_selection(self, ids, **options):
         tmp = self.path + '.seleccion.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'ids': list(ids)}, f)
+            json.dump(dict(options, ids=list(ids)), f)
         os.replace(tmp, self.path + '.seleccion')

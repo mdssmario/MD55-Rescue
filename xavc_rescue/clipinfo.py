@@ -21,6 +21,7 @@ def _fill(info, meta):
         gamma = 'S-Log3 · S-Gamut3.Cine'
     info['perfil'] = gamma
     info['fecha'] = (meta.get('fecha') or '').replace('T', ' ')[:16] or None
+    info['fecha_seg'] = (meta.get('fecha') or '').replace('T', ' ')[:19] or None
     info['camara'] = meta.get('modelo')
     info['resolucion'] = meta.get('resolucion')
     info['fps'] = meta.get('fps_formato')

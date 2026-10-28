@@ -16,6 +16,7 @@ from . import clipinfo, mp4, mxf, photos, sonycard
 
 PHOTO_KINDS = ('raw', 'heif', 'jpg')
 LONE_HEADER = 1 << 20       # un "clip" de este tamaño o menos es solo una cabecera, sin vídeo
+THUMB_MAX = 1 << 20         # JPG menores: miniaturas que la cámara crea para cada clip
 PHOTO_EXTS = ('.ARW', '.DNG', '.TIF', '.HIF', '.HEIC', '.AVIF', '.JPG', '.JPEG')
 
 SECTOR = 512
@@ -287,11 +288,11 @@ def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=Non
     items = []
     state = {'stop': False}
 
-    def emit(kind, ext, plan, complete, note, brand, info=None, preview=None):
+    def emit(kind, ext, plan, complete, note, brand, info=None, preview=None, thumb=False):
         item = {'id': len(items) + 1, 'kind': kind, 'ext': ext.upper(), 'plan': plan,
                 'complete': complete, 'note': note, 'brand': brand,
                 'offset': plan.get('start', plan.get('header_pos', 0)), 'size': _plan_size(plan),
-                'info': info or {}, 'preview': preview}
+                'info': info or {}, 'preview': preview, 'thumb': thumb}
         item['name'] = proposed_name(item)
         items.append(item)
         log('  %s  %8.1f MB  %s%s' % (item['name'], item['size'] / 1048576, note,
@@ -318,8 +319,10 @@ def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=Non
             preview = os.path.join(preview_dir, 'previa_%04d.jpg' % (len(items) + 1))
             with open(preview, 'wb') as f:
                 f.write(jpeg)
-        emit(kind, ext, {'type': 'range', 'start': s, 'end': e}, complete, note, brand,
-             photos.summary_blob(head, ext), preview)
+        thumb = ext == 'JPG' and e - s < THUMB_MAX
+        emit(kind, ext, {'type': 'range', 'start': s, 'end': e}, complete,
+             'miniatura de la cámara' if thumb else note, brand, photos.summary_blob(head, ext),
+             preview, thumb)
         return e if complete else None
 
     def try_pair(clip, om):
@@ -418,8 +421,13 @@ def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=Non
     return items
 
 
-def extract_item(src, item, out_dir, progress=None):
-    """Guarda un elemento de la exploración. Devuelve la ruta del archivo creado."""
+def extract_item(src, item, out_dir, progress=None, by_date=False):
+    """Guarda un elemento de la exploración. Devuelve la ruta del archivo creado.
+    Con by_date se guarda en una subcarpeta AAAA-MM-DD según la fecha de la cámara."""
+    if by_date:
+        day = (item['info'].get('fecha') or '')[:10]
+        out_dir = os.path.join(out_dir, day if re.match(r'\d{4}-\d\d-\d\d$', day) else 'sin_fecha')
+        os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, item['name'])
     base, ext = os.path.splitext(path)
     n = 2
@@ -503,7 +511,7 @@ def _repair_incomplete(saved, reference, log, on_clip):
 def _public(item, **extra):
     """Datos de un elemento para la interfaz (sin el plan interno)."""
     d = {k: item[k] for k in ('id', 'kind', 'ext', 'complete', 'note', 'offset', 'size', 'name',
-                              'preview')}
+                              'preview', 'thumb')}
     d.update(item['info'])
     d.update(extra)
     return d
@@ -572,10 +580,14 @@ def explore(source, out_dir, wait_selection, log=print, progress=None, should_st
         items = scan(src, kinds, log, progress, should_stop, start, end,
                      (lambda it: on_item(_public(it)) if on_item else None), preview_dir)
         log('Exploración terminada: %d archivos encontrados.' % len(items))
-        ids = wait_selection(items)
-        if ids is None:
+        selection = wait_selection(items)
+        if selection is None:
             log('No se recupera nada.')
             return []
+        if isinstance(selection, dict):
+            ids, by_date = selection.get('ids', []), bool(selection.get('por_fecha'))
+        else:
+            ids, by_date = selection, False
         chosen = [it for it in items if it['id'] in set(ids)]
         total = sum(it['size'] for it in chosen) or 1
         done = [0]
@@ -591,7 +603,7 @@ def explore(source, out_dir, wait_selection, log=print, progress=None, should_st
             if should_stop and should_stop():
                 log('Recuperación detenida por el usuario.')
                 break
-            path = extract_item(src, it, out_dir, step)
+            path = extract_item(src, it, out_dir, step, by_date)
             same = verifier.check(path, it['size'])
             r = _public(it, path=path, identico_a=same)
             saved.append(r)

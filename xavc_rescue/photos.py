@@ -273,11 +273,10 @@ def summary_blob(head, ext):
     info['camara'] = model
     if date:
         info['fecha'] = date[:16].replace(':', '-', 2)
+        info['fecha_seg'] = date[:19].replace(':', '-', 2)
     ext = ext.upper()
     info['codec'] = {'ARW': 'RAW ARW', 'DNG': 'RAW DNG', 'TIF': 'TIFF', 'HIF': 'HEIF',
                      'HEIC': 'HEIF', 'AVIF': 'AVIF', 'JPG': 'JPEG'}.get(ext, ext)
-    if model:
-        info['codec'] += ' · ' + model
     return info
 
 
