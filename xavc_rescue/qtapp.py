@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, analyze, devices, uikit, worker
+from .carve import PHOTO_KINDS
 from .events import EventReader
-from .uikit import (ACCENT, BAD, MUTED, OK, WARN, ActionCard, DriveList, human_size, section,
-                    svg_pixmap)
+from .uikit import (ACCENT, BAD, DIM, FAINT, MUTED, OK, VIDEO, WARN, WHITE, ActionCard, Disclosure,
+                    DriveList, EmptyState, human_size, plural, section, svg_pixmap, tint)
 
-PHOTO_KINDS = ('raw', 'heif', 'jpg')
 SORT_ROLE = Qt.UserRole + 3
+VIDEO_FILTER = 'Vídeo (*.mp4 *.MP4 *.mov *.MOV)'
+PREVIEW_W, PREVIEW_H = 200, 112
 
 CAMERA_NAMES = {
     'ILCE-1': 'A1', 'ILCE-1M2': 'A1 II', 'ILCE-9M2': 'A9 II', 'ILCE-9M3': 'A9 III',
@@ -65,10 +67,6 @@ class SortItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-def qss():
-    return uikit.stylesheet()
-
-
 def human_time(s):
     if s is None:
         return '—'
@@ -96,21 +94,14 @@ def asset(name):
     return os.path.join(base, 'assets', name)
 
 
-def logo_pixmap(height, color=ACCENT):
+def logo_pixmap(height, color=ACCENT, ratio=2):
     """Logo MD55 teñido de un color, a la altura indicada (en píxeles)."""
     src = QPixmap(asset('logo.png'))
     if src.isNull():
         return QPixmap()
-    src = src.scaledToHeight(height * 2, Qt.SmoothTransformation)
-    pm = QPixmap(src.size())
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.drawPixmap(0, 0, src)
-    p.setCompositionMode(QPainter.CompositionMode_SourceIn)
-    p.fillRect(pm.rect(), QColor(color))
-    p.end()
-    pm.setDevicePixelRatio(2)
-    return pm
+    src = src.scaledToHeight(height * ratio, Qt.SmoothTransformation)
+    src.setDevicePixelRatio(ratio)
+    return tint(src, color)
 
 
 def app_icon(size=256):
@@ -123,17 +114,9 @@ def app_icon(size=256):
     p.setPen(Qt.NoPen)
     m = size // 32
     p.drawRoundedRect(m, m, size - 2 * m, size - 2 * m, size * 0.2, size * 0.2)
-    logo = QPixmap(asset('logo.png'))
+    logo = logo_pixmap(int(size * 0.68), ratio=1)
     if not logo.isNull():
-        logo = logo.scaledToHeight(int(size * 0.68), Qt.SmoothTransformation)
-        tinted = QPixmap(logo.size())
-        tinted.fill(Qt.transparent)
-        q = QPainter(tinted)
-        q.drawPixmap(0, 0, logo)
-        q.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        q.fillRect(tinted.rect(), QColor(ACCENT))
-        q.end()
-        p.drawPixmap((size - tinted.width()) // 2, (size - tinted.height()) // 2, tinted)
+        p.drawPixmap((size - logo.width()) // 2, (size - logo.height()) // 2, logo)
     p.end()
     return QIcon(pm)
 
@@ -255,6 +238,46 @@ def hint(text):
     return lab
 
 
+def data_table(cols):
+    """Tabla de solo lectura con el aspecto común de la aplicación."""
+    t = QTableWidget(0, len(cols))
+    t.setHorizontalHeaderLabels(cols)
+    t.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    t.horizontalHeader().setHighlightSections(False)
+    t.verticalHeader().setVisible(False)
+    t.verticalHeader().setDefaultSectionSize(34)
+    t.setAlternatingRowColors(True)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    t.setShowGrid(False)
+    t.setWordWrap(False)
+    t.setTextElideMode(Qt.ElideRight)
+    return t
+
+
+def accept_file_drops(widget, on_files):
+    """Permite soltar archivos sobre un widget; on_files recibe la lista de rutas."""
+    widget.setAcceptDrops(True)
+
+    def enter(e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def drop(e):
+        on_files([os.path.normpath(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()])
+
+    widget.dragEnterEvent = enter
+    widget.dropEvent = drop
+
+
+def rich(title, *lines):
+    """Bloque de texto de las fichas: título en blanco y líneas (texto, color) debajo."""
+    out = '<span style="color:%s;font-size:14px;font-weight:600">%s</span>' % (WHITE, title)
+    for text, color in lines:
+        out += '<br><span style="color:%s">%s</span>' % (color, text) if text else '<br>'
+    return out
+
+
 def card(*widgets, margins=(16, 14, 16, 14), spacing=8):
     f = QFrame()
     f.setObjectName('card')
@@ -321,21 +344,12 @@ class LogPanel(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.toggle = QPushButton('▸  Registro detallado')
-        self.toggle.setObjectName('link')
-        self.toggle.setCheckable(True)
-        self.toggle.toggled.connect(self._toggled)
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setMaximumBlockCount(5000)
-        self.text.setVisible(False)
         self.text.setMinimumHeight(150)
-        lay.addWidget(self.toggle, 0, Qt.AlignLeft)
+        lay.addWidget(Disclosure('Registro detallado', self.text), 0, Qt.AlignLeft)
         lay.addWidget(self.text)
-
-    def _toggled(self, on):
-        self.text.setVisible(on)
-        self.toggle.setText(('▾' if on else '▸') + '  Registro detallado')
 
     def append(self, msg):
         self.text.appendPlainText(msg)
@@ -370,6 +384,7 @@ class ProgressPanel(QWidget):
 def status_item(text, color):
     it = QTableWidgetItem('●  ' + text)
     it.setForeground(QColor(color))
+    it.setToolTip(text)
     return it
 
 
@@ -431,10 +446,6 @@ class RescuePage(QWidget):
         self.out.edit.textChanged.connect(self._validate)
         lay.addWidget(card(self.out, hint('Debe estar en otro disco, nunca en la tarjeta que se rescata.')))
 
-        self.adv_toggle = QPushButton('▸  Opciones avanzadas')
-        self.adv_toggle.setObjectName('link')
-        self.adv_toggle.setCheckable(True)
-        lay.addWidget(self.adv_toggle, 0, Qt.AlignLeft)
         self.ref = PathRow('(opcional) carpeta con clips sanos de la misma cámara')
         self.cmp = PathRow('(opcional) carpeta con copias de los archivos para verificar')
         g = QGridLayout()
@@ -445,22 +456,24 @@ class RescuePage(QWidget):
         g.addWidget(self.cmp, 1, 1)
         adv = card(g, hint('Con «Verificar», la búsqueda se detiene al encontrar todos esos archivos y '
                            'comprueba que los recuperados son idénticos byte a byte (SHA-256).'))
-        adv.setVisible(False)
-        self.adv_toggle.toggled.connect(lambda on: (adv.setVisible(on), self.adv_toggle.setText(
-            ('▾' if on else '▸') + '  Opciones avanzadas')))
+        lay.addWidget(Disclosure('Opciones avanzadas', adv), 0, Qt.AlignLeft)
         lay.addWidget(adv)
         lay.addStretch(1)
         bottom = QHBoxLayout()
+        bottom.setSpacing(14)
         bottom.addStretch(1)
+        self.go_hint = hint('')
+        bottom.addWidget(self.go_hint)
         self.go = QPushButton('Explorar tarjeta')
         self.go.setObjectName('primary')
         self.go.clicked.connect(self.start)
         bottom.addWidget(self.go)
         lay.addLayout(bottom)
+        self._validate()
 
     def refresh_drives(self):
         self.drives.set_drives([d for d in devices.list_drives() if not d['system']],
-                               'No se detecta ninguna tarjeta. Conéctala y pulsa «Actualizar».')
+                               'Conéctala y pulsa «Actualizar», o usa una imagen de disco (.img).')
 
     def pick_image(self):
         p, _ = QFileDialog.getOpenFileName(self, 'Imagen de la tarjeta', '',
@@ -471,9 +484,18 @@ class RescuePage(QWidget):
                              'removable': False, 'system': False, 'image': True})
 
     def _validate(self):
-        if hasattr(self, 'go'):
-            self.go.setEnabled(bool(self.drives.selected()) and bool(self.out.text())
-                               and (self.want_video.isChecked() or self.want_photo.isChecked()))
+        if not hasattr(self, 'go'):         # aún construyendo la página
+            return
+        if not self.drives.selected():
+            why = 'Elige una tarjeta o una imagen de disco.'
+        elif not (self.want_video.isChecked() or self.want_photo.isChecked()):
+            why = 'Marca vídeo, fotos o ambos.'
+        elif not self.out.text():
+            why = 'Indica dónde guardar lo recuperado.'
+        else:
+            why = ''
+        self.go_hint.setText(why)
+        self.go.setEnabled(not why)
 
     # ---- exploración, selección y recuperación
     C_CHECK, C_NAME, C_CAM, C_DUR, C_FMT, C_PROF, C_SIZE, C_STATE = range(8)
@@ -503,7 +525,7 @@ class RescuePage(QWidget):
         self.open_btn.clicked.connect(lambda: open_path(self.out_dir))
         self.new_btn = QPushButton('Nueva búsqueda')
         self.new_btn.setObjectName('primary')
-        self.new_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        self.new_btn.clicked.connect(self.new_search)
         for b in (self.stop_btn, self.cancel_btn, self.open_btn, self.new_btn):
             head.addWidget(b, 0, Qt.AlignTop)
         lay.addLayout(head)
@@ -540,24 +562,15 @@ class RescuePage(QWidget):
         self.filter_bar.setLayout(bar)
         lay.addWidget(self.filter_bar)
 
-        self.table = QTableWidget(0, len(self.COLS))
-        self.table.setHorizontalHeaderLabels(self.COLS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table = data_table(self.COLS)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setShowGrid(False)
         self.table.setIconSize(QSize(18, 18))
-        self.table.setTextElideMode(Qt.ElideRight)
-        self.table.setWordWrap(False)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         h = self.table.horizontalHeader()
         h.setMinimumSectionSize(34)
         h.setSortIndicatorShown(True)
-        for col, width in ((self.C_CHECK, 62), (self.C_CAM, 76), (self.C_DUR, 66), (self.C_FMT, 172),
-                           (self.C_PROF, 150), (self.C_SIZE, 78), (self.C_STATE, 128)):
+        for col, width in ((self.C_CHECK, 62), (self.C_CAM, 72), (self.C_DUR, 84), (self.C_FMT, 168),
+                           (self.C_PROF, 168), (self.C_SIZE, 80), (self.C_STATE, 122)):
             h.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, width)
         h.setSectionResizeMode(self.C_NAME, QHeaderView.Stretch)
@@ -569,8 +582,8 @@ class RescuePage(QWidget):
         # vista previa (foto, o la miniatura de la cámara en los vídeos), debajo de la tabla
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setFixedSize(240, 136)
-        self.preview.setObjectName('hint')
+        self.preview.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.preview.setObjectName('preview')
         self.preview_info = QLabel()
         self.preview_info.setWordWrap(True)
         self.preview_info.setTextFormat(Qt.RichText)
@@ -578,7 +591,7 @@ class RescuePage(QWidget):
         prow.setSpacing(16)
         prow.addWidget(self.preview)
         prow.addWidget(self.preview_info, 1, Qt.AlignTop)
-        self.preview_card = card(prow, margins=(12, 12, 16, 12))
+        self.preview_card = card(prow, margins=(10, 10, 16, 10))
         self.preview_card.setVisible(False)
         lay.addWidget(self.preview_card)
 
@@ -588,14 +601,18 @@ class RescuePage(QWidget):
         foot.addWidget(self.log, 1, Qt.AlignTop)
         self.by_date = QCheckBox('Separar en carpetas por fecha')
         self.by_date.setToolTip('Guarda cada archivo en una subcarpeta AAAA-MM-DD según la fecha de la cámara')
-        foot.addWidget(self.by_date, 0, Qt.AlignTop)
         self.sel_label = QLabel('')
         self.sel_label.setObjectName('hint')
-        foot.addWidget(self.sel_label, 0, Qt.AlignTop)
         self.recover_btn = QPushButton('Recuperar seleccionados')
         self.recover_btn.setObjectName('primary')
         self.recover_btn.clicked.connect(self.recover)
-        foot.addWidget(self.recover_btn, 0, Qt.AlignTop)
+        actions = QWidget()
+        al = QHBoxLayout(actions)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(14)
+        for wdg in (self.by_date, self.sel_label, self.recover_btn):
+            al.addWidget(wdg)
+        foot.addWidget(actions, 0, Qt.AlignTop)
         lay.addLayout(foot)
         return w
 
@@ -630,7 +647,7 @@ class RescuePage(QWidget):
         except OSError as e:
             QMessageBox.warning(self, 'Carpeta de salida', str(e))
             return
-        self.preview_dir = os.path.join(worker.new_events_path() + '_previas')
+        self.preview_dir = worker.new_events_path() + '_previas'
         args = ['explorar', d['id'], '-o', self.out_dir, '--previas', self.preview_dir]
         if self.ref.text():
             args += ['--referencia', self.ref.text()]
@@ -685,6 +702,13 @@ class RescuePage(QWidget):
             self.job.stop()
         self.stack.setCurrentIndex(0)
 
+    def new_search(self):
+        """Vuelve a la configuración con las unidades al día y, si se usó la carpeta propuesta, otra nueva."""
+        if os.path.dirname(self.out.text()) == os.path.dirname(default_output()):
+            self.out.setText(default_output())
+        self.refresh_drives()
+        self.stack.setCurrentIndex(0)
+
     def _on_log(self, msg):
         if self.t0 is None:
             self.t0 = time.monotonic()
@@ -710,10 +734,10 @@ class RescuePage(QWidget):
 
     def _found_text(self):
         f = self.found
-        parts = ['%d vídeo%s (%s)' % (f['video'], '' if f['video'] == 1 else 's', human_size(f['video_bytes'])),
-                 '%d foto%s' % (f['photo'], '' if f['photo'] == 1 else 's')]
+        parts = ['%s (%s)' % (plural(f['video'], 'vídeo'), human_size(f['video_bytes'])),
+                 plural(f['photo'], 'foto')]
         if f['thumb']:
-            parts.append('%d miniatura%s' % (f['thumb'], '' if f['thumb'] == 1 else 's'))
+            parts.append(plural(f['thumb'], 'miniatura'))
         return ' · '.join(parts)
 
     # ---- eventos del motor
@@ -758,7 +782,7 @@ class RescuePage(QWidget):
         check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
         check.setCheckState(Qt.Checked if ev.get('complete') and not thumb else Qt.Unchecked)
         icon = 'video' if not photo else 'image' if thumb else 'photo'
-        check.setIcon(QIcon(svg_pixmap(icon, '#7aa7ff' if not photo else MUTED if thumb else ACCENT, 18)))
+        check.setIcon(QIcon(svg_pixmap(icon, VIDEO if not photo else MUTED if thumb else ACCENT, 18)))
         check.setData(Qt.UserRole, ev)
         check.setData(SORT_ROLE, 0 if not photo else 2 if thumb else 1)
         check.setToolTip('Vídeo' if not photo else 'Miniatura de la cámara' if thumb else 'Foto')
@@ -772,13 +796,15 @@ class RescuePage(QWidget):
         size = SortItem(human_size(ev.get('size') or 0))
         size.setData(SORT_ROLE, ev.get('size') or 0)
         if thumb:
-            state = status_item('Miniatura', '#5f646d')
+            state = status_item('Miniatura', FAINT)
         else:
             state = status_item('Encontrado' if ev.get('complete') else 'Incompleto',
                                 MUTED if ev.get('complete') else WARN)
         cells = [check, name, cam, dur, SortItem(ev.get('codec') or '—'), SortItem(ev.get('perfil') or '—'),
                  size, state]
         for c, it in enumerate(cells):
+            if c and not it.toolTip():
+                it.setToolTip(it.text())        # por si la columna corta el texto
             self.table.setItem(r, c, it)
         self._apply_filter_row(r)
         self.table.blockSignals(False)
@@ -873,10 +899,10 @@ class RescuePage(QWidget):
             if ev['id'] in ids:
                 self.table.setItem(r, self.C_STATE, status_item('Pendiente', MUTED))
             else:
-                self.table.setItem(r, self.C_STATE, status_item('Omitido', '#5f646d'))
+                self.table.setItem(r, self.C_STATE, status_item('Omitido', FAINT))
                 self.table.setRowHidden(r, True)
         self.table.blockSignals(False)
-        self.run_title.setText('Recuperando %d archivo%s' % (len(chosen), '' if len(chosen) == 1 else 's'))
+        self.run_title.setText('Recuperando %s' % plural(len(chosen), 'archivo'))
         self.run_sub.setText('Guardando en %s%s' % (self.out_dir, ' (una carpeta por fecha)'
                                                    if self.by_date.isChecked() else ''))
         self.job.send_selection(sorted(ids), por_fecha=self.by_date.isChecked())
@@ -918,9 +944,9 @@ class RescuePage(QWidget):
         best = None
         for stamp, path in self.thumbs:
             t = parse_when(stamp)
-            if t is not None and abs((t - when).total_seconds()) <= 3:
-                if best is None or abs((t - when).total_seconds()) < best[0]:
-                    best = (abs((t - when).total_seconds()), path)
+            gap = abs((t - when).total_seconds()) if t is not None else None
+            if gap is not None and gap <= 3 and (best is None or gap < best[0]):
+                best = (gap, path)
         return best[1] if best else None
 
     def _show_preview(self):
@@ -935,21 +961,25 @@ class RescuePage(QWidget):
             self.preview.setPixmap(QPixmap())
             self.preview.setText('Sin vista previa')
         else:
-            self.preview.setPixmap(pm.scaled(240, 136, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        details = [ev.get('codec') or '—', ev.get('perfil'), camera_name(ev.get('camara')),
-                   (ev.get('fecha_seg') or ev.get('fecha') or '—'), human_size(ev.get('size') or 0)]
-        if not photo:
-            details.insert(1, human_time(ev.get('duracion')))
+            ratio = self.devicePixelRatioF()
+            pm = pm.scaled(int(PREVIEW_W * ratio), int(PREVIEW_H * ratio), Qt.KeepAspectRatio,
+                           Qt.SmoothTransformation)
+            pm.setDevicePixelRatio(ratio)
+            self.preview.setPixmap(pm)
+        cam = camera_name(ev.get('camara'))
+        details = [ev.get('codec') or '—',
+                   None if photo else human_time(ev.get('duracion')) if ev.get('duracion') else None,
+                   ev.get('perfil'), cam if cam != '—' else None,
+                   ev.get('fecha_seg') or ev.get('fecha'), human_size(ev.get('size') or 0)]
         where = ev.get('path') or ('Miniatura que la cámara crea para un clip; no es una foto.'
                                    if ev.get('thumb') else 'Aún no recuperado')
         note = '' if photo else ('Imagen: miniatura de la cámara' if source else
                                  'Este clip no tiene miniatura de la cámara en la tarjeta')
-        self.preview_info.setText(
-            '<span style="color:#fff;font-size:14px;font-weight:600">%s</span><br>'
-            '<span style="color:%s">%s</span><br><br><span style="color:%s">%s</span>'
-            '<br><span style="color:#6b707a">%s</span>'
-            % (os.path.basename(ev.get('path') or ev.get('name', '')), MUTED,
-               ' · '.join(x for x in details if x and x != '—' or x == details[0]), MUTED, where, note))
+        if not ev.get('complete') and ev.get('note'):
+            note = 'Incompleto: %s' % ev['note']
+        self.preview_info.setText(rich(os.path.basename(ev.get('path') or ev.get('name', '')),
+                                       (' · '.join(x for x in details if x), MUTED), ('', None),
+                                       (where, MUTED), (note, DIM)))
         self.preview_card.setVisible(True)
 
     def _on_finished(self, ok, msg):
@@ -959,8 +989,10 @@ class RescuePage(QWidget):
             return
         self._set_mode('done')
         if ok:
-            self.run_title.setText('Terminado: %d vídeo%s · %d foto%s recuperados' % (
-                self.saved_v, '' if self.saved_v == 1 else 's', self.saved_p, '' if self.saved_p == 1 else 's'))
+            got = [plural(n, w) for n, w in ((self.saved_v, 'vídeo'), (self.saved_p, 'foto')) if n]
+            ending = ('a' if not self.saved_v else 'o') + ('' if self.saved_v + self.saved_p == 1 else 's')
+            self.run_title.setText('Terminado: %s recuperad%s' % (' y '.join(got), ending) if got
+                                   else 'Terminado: no se recuperó nada')
             self.run_sub.setText('Doble clic en un archivo para abrirlo. Están en %s' % self.out_dir)
             self.progress.set(1.0, '100 %')
         else:
@@ -975,7 +1007,7 @@ class RepairPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAcceptDrops(True)
+        accept_file_drops(self, self._add)
         lay = page_scaffold(self)
         lay.addWidget(page_header('Reparar clips interrumpidos',
                                   'Para clips que no abren porque la grabación se cortó (batería, tarjeta '
@@ -986,39 +1018,19 @@ class RepairPage(QWidget):
         head.addStretch(1)
         add = QPushButton('Añadir clips…')
         add.clicked.connect(self.add_files)
-        clear = QPushButton('Quitar todos')
-        clear.clicked.connect(lambda: self.table.setRowCount(0))
+        self.clear_btn = QPushButton('Quitar todos')
+        self.clear_btn.clicked.connect(lambda: self.table.setRowCount(0))
         head.addWidget(add)
-        head.addWidget(clear)
+        head.addWidget(self.clear_btn)
         lay.addLayout(head)
-        self.table = QTableWidget(0, len(self.COLS))
-        self.table.setHorizontalHeaderLabels(self.COLS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
-        self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setShowGrid(False)
+        self.table = data_table(self.COLS)
         self.table.setMinimumHeight(180)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_result)
-        drop = QFrame()
-        drop.setObjectName('card')
-        drop.setStyleSheet('QFrame#card { border: 1px dashed #3a404b; }')
+        drop = EmptyState('repair', 'Arrastra aquí los clips que no abren',
+                          'o usa «Añadir clips…». Se reparan uno tras otro con la misma referencia.')
         drop.setMinimumHeight(200)
-        dl = QVBoxLayout(drop)
-        dl.setAlignment(Qt.AlignCenter)
-        di = QLabel()
-        di.setPixmap(svg_pixmap('repair', MUTED, 40))
-        di.setAlignment(Qt.AlignCenter)
-        dt = QLabel('Arrastra aquí los clips que no abren')
-        dt.setObjectName('cardTitle')
-        dt.setAlignment(Qt.AlignCenter)
-        ds = hint('o usa «Añadir clips…». Se reparan uno tras otro con la misma referencia.')
-        ds.setAlignment(Qt.AlignCenter)
-        for w in (di, dt, ds):
-            dl.addWidget(w)
         self.list_stack = QStackedWidget()
         self.list_stack.addWidget(drop)
         self.list_stack.addWidget(self.table)
@@ -1029,6 +1041,7 @@ class RepairPage(QWidget):
 
         lay.addWidget(section('2 · Referencia'))
         self.ref = PathRow('Carpeta con clips sanos (se elige el compatible) o un clip concreto')
+        self.ref.edit.textChanged.connect(self._update_empty)
         btn_file = QPushButton('Un clip…')
         btn_file.clicked.connect(self._pick_ref_file)
         self.ref.layout().addWidget(btn_file)
@@ -1043,6 +1056,8 @@ class RepairPage(QWidget):
         row = QHBoxLayout()
         self.log = LogPanel()
         row.addWidget(self.log, 1, Qt.AlignTop)
+        self.go_hint = hint('')
+        row.addWidget(self.go_hint, 0, Qt.AlignVCenter)
         self.go = QPushButton('Reparar')
         self.go.setObjectName('primary')
         self.go.clicked.connect(self.start)
@@ -1050,39 +1065,46 @@ class RepairPage(QWidget):
         lay.addLayout(row)
         self.queue = []
         self.job = None
+        self._update_empty()
+
+    def _pending(self):
+        return [r for r in range(self.table.rowCount())
+                if self.table.item(r, 0) and self.table.item(r, 0).text().endswith(('Pendiente', 'Error'))]
 
     def _update_empty(self, *_):
         self.list_stack.setCurrentIndex(1 if self.table.rowCount() else 0)
+        busy = bool(self.job and self.job.running)
+        why = ('' if busy else 'Añade los clips dañados.' if not self._pending()
+               else 'Indica la referencia.' if not self.ref.text() else '')
+        self.go_hint.setText(why)
+        self.go.setEnabled(not busy and not why)
 
     def _pick_ref_file(self):
-        p, _ = QFileDialog.getOpenFileName(self, 'Clip de referencia', '', 'Vídeo (*.mp4 *.MP4 *.mov)')
+        p, _ = QFileDialog.getOpenFileName(self, 'Clip de referencia', '', VIDEO_FILTER)
         if p:
             self.ref.setText(os.path.normpath(p))
 
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        self._add([u.toLocalFile() for u in e.mimeData().urls()])
-
     def add_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, 'Clips dañados', '', 'Vídeo (*.mp4 *.MP4 *.mov)')
+        files, _ = QFileDialog.getOpenFileNames(self, 'Clips dañados', '', VIDEO_FILTER)
         self._add(files)
 
     def _add(self, files):
+        known = {self.table.item(r, 1).data(Qt.UserRole) for r in range(self.table.rowCount())}
         for f in files:
-            if not os.path.isfile(f):
+            f = os.path.normpath(f)
+            if not os.path.isfile(f) or f in known:
                 continue
+            known.add(f)
             r = self.table.rowCount()
             self.table.insertRow(r)
             self.table.setItem(r, 0, status_item('Pendiente', MUTED))
             name = QTableWidgetItem(os.path.basename(f))
-            name.setData(Qt.UserRole, os.path.normpath(f))
+            name.setData(Qt.UserRole, f)
             name.setToolTip(f)
             self.table.setItem(r, 1, name)
             for c in (2, 3, 4):
                 self.table.setItem(r, c, QTableWidgetItem('—' if c < 4 else ''))
+        self._update_empty()
 
     def _open_result(self, r, _c):
         it = self.table.item(r, 4)
@@ -1092,11 +1114,11 @@ class RepairPage(QWidget):
         if not self.ref.text():
             QMessageBox.information(self, 'Referencia', 'Indica una carpeta con clips sanos o un clip de referencia.')
             return
-        self.queue = [r for r in range(self.table.rowCount())
-                      if self.table.item(r, 0).text().endswith(('Pendiente', 'Error'))]
+        self.queue = self._pending()
         if not self.queue:
             return
         self.go.setEnabled(False)
+        self.clear_btn.setEnabled(False)
         self.log.clear()
         self.done_count = 0
         self.total = len(self.queue)
@@ -1104,8 +1126,10 @@ class RepairPage(QWidget):
 
     def _next(self):
         if not self.queue:
-            self.go.setEnabled(True)
-            self.progress.set(1.0, 'Terminado: %d clip(s)' % self.total)
+            self.job = None
+            self.clear_btn.setEnabled(True)
+            self._update_empty()
+            self.progress.set(1.0, 'Terminado: %s' % plural(self.total, 'clip'))
             return
         self.row = self.queue.pop(0)
         src = self.table.item(self.row, 1).data(Qt.UserRole)
@@ -1143,7 +1167,7 @@ class RepairPage(QWidget):
 class AnalyzePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAcceptDrops(True)
+        accept_file_drops(self, self._dropped)
         lay = page_scaffold(self)
         lay.addWidget(page_header('Analizar un clip',
                                   'Estructura del archivo, si le falta el índice, códec, fps y perfil de '
@@ -1151,34 +1175,39 @@ class AnalyzePage(QWidget):
         row = QHBoxLayout()
         self.path = PathRow('Clip MP4 / MXF', mode='file', filter_='Vídeo (*.mp4 *.MP4 *.mxf *.MXF *.mov)')
         row.addWidget(self.path, 1)
-        go = QPushButton('Analizar')
-        go.setObjectName('primary')
-        go.clicked.connect(self.run)
-        row.addWidget(go)
+        self.go = QPushButton('Analizar')
+        self.go.setObjectName('primary')
+        self.go.clicked.connect(self.run)
+        self.path.edit.textChanged.connect(lambda t: self.go.setEnabled(os.path.isfile(t.strip())))
+        self.path.edit.returnPressed.connect(self.run)
+        self.go.setEnabled(False)
+        row.addWidget(self.go)
         lay.addWidget(card(row))
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
-        self.text.setPlaceholderText('Arrastra aquí un clip o elígelo arriba.')
         self.text.setMinimumHeight(420)
-        lay.addWidget(self.text, 1)
+        empty = EmptyState('analyze', 'Arrastra aquí un clip',
+                           'o elígelo arriba. Solo se lee: el archivo no se modifica.')
+        self.body = QStackedWidget()
+        self.body.addWidget(empty)
+        self.body.addWidget(self.text)
+        lay.addWidget(self.body, 1)
         self.thread = None
 
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        urls = e.mimeData().urls()
-        if urls:
-            self.path.setText(os.path.normpath(urls[0].toLocalFile()))
+    def _dropped(self, paths):
+        if paths:
+            self.path.setText(paths[0])
             self.run()
 
     def run(self):
-        if not os.path.isfile(self.path.text()):
+        if not os.path.isfile(self.path.text()) or (self.thread and self.thread.isRunning()):
             return
-        self.text.setPlainText('Analizando…')
+        self.body.setCurrentIndex(1)
+        self.text.setPlainText('Analizando %s…' % os.path.basename(self.path.text()))
+        self.go.setEnabled(False)
         self.thread = AnalyzeThread(self.path.text(), self)
         self.thread.result.connect(self.text.setPlainText)
+        self.thread.finished.connect(lambda: self.go.setEnabled(True))
         self.thread.start()
 
 
@@ -1271,8 +1300,8 @@ class CardToolsPage(QWidget):
     # ---- selección
     def refresh(self):
         self.drives.set_drives([d for d in devices.list_drives() if not d['system'] and d['removable']],
-                               'No hay tarjetas conectadas. Solo se muestran unidades extraíbles '
-                               '(tarjetas y lectores), nunca discos ni SSD externos.')
+                               'Solo se muestran unidades extraíbles (tarjetas y lectores), nunca discos '
+                               'ni SSD externos. Conecta la tarjeta y pulsa «Actualizar».')
 
     def _sel(self):
         return self.drives.selected()
@@ -1286,6 +1315,7 @@ class CardToolsPage(QWidget):
 
     def _selected_changed(self):
         self._set_enabled()
+        self.info_card.setVisible(bool(self._sel()))
         if self._sel() and not self._busy():
             self.do_info()
 
@@ -1373,15 +1403,14 @@ class CardToolsPage(QWidget):
             parts = ', '.join('%s a %s MB' % (p.get('letter') or p.get('n'), (p.get('offset') or 0) // 1048576)
                               for p in c.get('partitions', []))
             used = (c['volsize'] or 0) - (c['free'] or 0) if c.get('volsize') else None
-            self.info.setText(
-                '<span style="color:#fff;font-size:14px;font-weight:600">%s &nbsp;%s</span>'
-                '&nbsp;&nbsp;<span style="color:%s">%s</span><br>'
-                '%s · %s %s · partición %s · %s usados de %s<br>'
-                '<span style="color:#e6e6e6"><b>Vida útil:</b> %s</span>' % (
-                    c['id'], c['model'], MUTED, human_size(c['size'] or 0), c.get('bus') or '',
-                    c.get('style') or '', c.get('fs') or '', parts or '—',
-                    human_size(used) if used is not None else '—',
-                    human_size(c['volsize']) if c.get('volsize') else '—', h['conclusion']))
+            line = ' · '.join(x for x in (
+                c.get('bus'), ' '.join(x for x in (c.get('style'), c.get('fs')) if x),
+                'partición %s' % (parts or '—'),
+                '%s usados de %s' % (human_size(used), human_size(c['volsize'])) if used is not None else None)
+                if x)
+            self.info.setText(rich('%s &nbsp;%s &nbsp;<span style="color:%s;font-weight:400">%s</span>'
+                                   % (c['id'], c['model'], MUTED, human_size(c['size'] or 0)),
+                                   (line, MUTED), ('<b>Vida útil:</b> %s' % h['conclusion'], '#e6e6e6')))
         elif 'veredicto' in data:
             v = data['veredicto']
             text = {'correcta': '✔ Tarjeta correcta', 'falsa': '✖ TARJETA FALSA',
@@ -1522,7 +1551,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName('MD55 Rescue')
     app.setStyle('Fusion')
-    app.setStyleSheet(qss())
+    app.setStyleSheet(uikit.stylesheet())
     w = MainWindow()
     w.show()
     return app.exec()

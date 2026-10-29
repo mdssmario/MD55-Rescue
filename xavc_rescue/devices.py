@@ -7,7 +7,6 @@ import sys
 
 def _win_drives():
     import ctypes
-    from ctypes import wintypes
     k32 = ctypes.windll.kernel32
     system = os.environ.get('SystemDrive', 'C:').upper()
     mask = k32.GetLogicalDrives()

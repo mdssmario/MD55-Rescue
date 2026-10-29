@@ -15,6 +15,10 @@ OK = '#7bd88f'
 WARN = '#f0c05a'
 BAD = '#ff7b72'
 MUTED = '#9aa0ab'
+DIM = '#6b707a'          # texto secundario dentro de fichas
+FAINT = '#5f646d'        # elementos omitidos / deshabilitados
+VIDEO = '#7aa7ff'
+WHITE = '#ffffff'
 
 # Iconos de línea propios (24×24, trazo 1.8)
 ICONS = {
@@ -54,6 +58,27 @@ def svg_pixmap(name, color=MUTED, size=20, stroke=1.8):
     return pm
 
 
+def tint(pm, color):
+    """Copia de un pixmap con todo lo opaco pintado de un color (para el logo)."""
+    ratio = pm.devicePixelRatio()
+    src = QPixmap(pm)
+    src.setDevicePixelRatio(1)           # pintar píxel a píxel; la escala se restaura al final
+    out = QPixmap(src.size())
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.drawPixmap(0, 0, src)
+    p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    p.fillRect(out.rect(), QColor(color))
+    p.end()
+    out.setDevicePixelRatio(ratio)
+    return out
+
+
+def plural(n, word, many=None):
+    """'1 vídeo', '3 vídeos'."""
+    return '%d %s' % (n, word if n == 1 else many or word + 's')
+
+
 def nav_icon(name):
     icon = QIcon()
     icon.addPixmap(svg_pixmap(name, '#8b919c'), QIcon.Normal, QIcon.Off)
@@ -89,6 +114,8 @@ QFrame#card { background: #1b1e25; border: 1px solid #2a2e37; border-radius: 12p
 QFrame#tile { background: #1b1e25; border: 1px solid #2a2e37; border-radius: 10px; }
 QFrame#tile[selected="true"] { background: #2a2216; border: 1px solid %(accent)s; }
 QFrame#tile:hover { border-color: #3a404b; }
+QFrame#empty { background: transparent; border: 1px dashed #3a404b; border-radius: 12px; }
+QLabel#preview { background: #15171c; border: 1px solid #2a2e37; border-radius: 8px; color: #6b707a; font-size: 12px; }
 QFrame#warn { background: #34191c; border: 1px solid #7a3338; border-radius: 10px; }
 QLineEdit { background: #1b1e25; border: 1px solid #2f343e; border-radius: 7px; padding: 8px 10px; }
 QLineEdit:focus { border-color: %(accent)s; }
@@ -97,7 +124,7 @@ QPushButton:hover { background: #2e333d; }
 QPushButton:disabled { color: #5f646d; border-color: #2a2e37; }
 QPushButton#primary { background: %(accent)s; color: #1a1306; border: none; font-weight: 600; padding: 10px 22px; }
 QPushButton#primary:hover { background: #f6b85c; }
-QPushButton#primary:disabled { background: #4a3d28; color: #2a2112; }
+QPushButton#primary:disabled { background: #2a2e37; color: #6b707a; }
 QPushButton#danger { background: #4a2326; border-color: #6b2f33; color: #ffd6d6; }
 QPushButton#danger:hover { background: #5a2a2e; }
 QPushButton#danger:disabled { background: #2a1d1f; color: #6b5557; }
@@ -220,8 +247,9 @@ class DriveList(QWidget):
         self.lay.setSpacing(6)
         self.tiles = []
         self.current = None
-        self.empty = QLabel('')
-        self.empty.setObjectName('hint')
+        self.empty = EmptyState('card', 'No hay ninguna tarjeta', '', compact=True)
+        self.empty.setVisible(False)
+        self.lay.addWidget(self.empty)
 
     def set_drives(self, drives, empty_text):
         keep = self.current.drive['id'] if self.current else None
@@ -229,12 +257,10 @@ class DriveList(QWidget):
             t.setParent(None)
         self.tiles = []
         self.current = None
-        self.empty.setParent(None)
         for d in drives:
             self.add(d, select=False)
-        if not drives:
-            self.empty.setText(empty_text)
-            self.lay.addWidget(self.empty)
+        self.empty.text.setText(empty_text)
+        self.empty.setVisible(not drives)
         for t in self.tiles:
             if t.drive['id'] == keep:
                 self._select(t)
@@ -245,6 +271,7 @@ class DriveList(QWidget):
         tile = DriveTile(drive, self._select)
         self.tiles.append(tile)
         self.lay.addWidget(tile)
+        self.empty.setVisible(False)
         if select:
             self._select(tile)
         return tile
@@ -288,6 +315,56 @@ class ActionCard(QFrame):
         row.addStretch(1)
         row.addWidget(self.button)
         lay.addLayout(row)
+
+
+class EmptyState(QFrame):
+    """Recuadro discontinuo con icono, título y explicación para cuando no hay nada que mostrar."""
+
+    def __init__(self, icon, title, text, compact=False, parent=None):
+        super().__init__(parent)
+        self.setObjectName('empty')
+        if compact:
+            lay = QHBoxLayout(self)
+            lay.setContentsMargins(16, 12, 16, 12)
+            lay.setSpacing(12)
+        else:
+            lay = QVBoxLayout(self)
+            lay.setAlignment(Qt.AlignCenter)
+            lay.setSpacing(6)
+        pic = QLabel()
+        pic.setPixmap(svg_pixmap(icon, MUTED, 26 if compact else 40))
+        pic.setAlignment(Qt.AlignCenter)
+        words = QVBoxLayout()
+        words.setSpacing(2)
+        self.title = QLabel(title)
+        self.title.setObjectName('cardTitle')
+        self.text = QLabel(text)
+        self.text.setObjectName('hint')
+        self.text.setWordWrap(True)
+        for lab in (self.title, self.text):
+            if not compact:
+                lab.setAlignment(Qt.AlignCenter)
+                lab.setMinimumWidth(460)
+            words.addWidget(lab)
+        lay.addWidget(pic)
+        lay.addLayout(words, 1 if compact else 0)
+
+
+class Disclosure(QPushButton):
+    """Enlace «▸ Título» que muestra u oculta un widget."""
+
+    def __init__(self, title, target, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.target = target
+        self.setObjectName('link')
+        self.setCheckable(True)
+        self.toggled.connect(self._toggled)
+        self._toggled(False)
+
+    def _toggled(self, on):
+        self.target.setVisible(on)
+        self.setText(('▾' if on else '▸') + '  ' + self.title)
 
 
 def section(title):
