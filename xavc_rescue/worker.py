@@ -2,6 +2,7 @@
 la tarjeta) y devuelve la ruta del archivo de eventos que la interfaz va leyendo."""
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,10 +21,34 @@ def _project_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def new_events_path():
+def temp_dir():
     d = os.path.join(tempfile.gettempdir(), 'xavc_rescue')
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, 'eventos_%d_%d.jsonl' % (os.getpid(), int(time.time() * 1000)))
+    return d
+
+
+def new_events_path():
+    return os.path.join(temp_dir(), 'eventos_%d_%d.jsonl' % (os.getpid(), int(time.time() * 1000)))
+
+
+def clean_temp(max_age=2 * 24 * 3600):
+    """Borra los eventos y las vistas previas de ejecuciones anteriores.
+
+    Se deja lo reciente por si hay otra copia de la aplicación abierta trabajando.
+    """
+    d = temp_dir()
+    now = time.time()
+    for name in os.listdir(d):
+        path = os.path.join(d, name)
+        try:
+            if now - os.path.getmtime(path) < max_age:
+                continue
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 def start(args, elevate=False):

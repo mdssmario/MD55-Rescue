@@ -1,5 +1,6 @@
 """Componentes visuales de la interfaz: iconos vectoriales, fichas de tarjeta, etiquetas y
 tarjetas de acción. Todo dibujado aquí (sin imágenes externas salvo el logo)."""
+import html
 import os
 import tempfile
 
@@ -79,6 +80,11 @@ def plural(n, word, many=None):
     return '%d %s' % (n, word if n == 1 else many or word + 's')
 
 
+def esc(text):
+    """Texto para las etiquetas con HTML: un nombre con < o & no rompe el formato."""
+    return html.escape('%s' % text, quote=False)
+
+
 def nav_icon(name):
     icon = QIcon()
     icon.addPixmap(svg_pixmap(name, '#8b919c'), QIcon.Normal, QIcon.Off)
@@ -102,8 +108,10 @@ QMainWindow, QWidget#page { background: #15171c; color: #e6e6e6; }
 QWidget { color: #e6e6e6; }
 QWidget#side { background: #101216; }
 QListWidget#nav { background: transparent; border: none; outline: 0; }
-QListWidget#nav::item { padding: 10px 12px; margin: 2px 10px; border-radius: 8px; color: #b9bcc4; }
-QListWidget#nav::item:selected { background: #22262e; color: #ffffff; }
+QListWidget#nav::item { padding: 10px 9px; margin: 2px 10px; border-radius: 8px; color: #b9bcc4;
+    border-left: 3px solid transparent; }
+QListWidget#nav::item:selected { background: #22262e; color: #ffffff;
+    border-left: 3px solid %(accent)s; }
 QListWidget#nav::item:hover:!selected { background: #1a1d24; }
 QLabel#title { font-size: 22px; font-weight: 600; color: #ffffff; }
 QLabel#subtitle { color: %(muted)s; }
@@ -233,7 +241,8 @@ class DriveTile(QFrame):
         self.style().polish(self)
 
     def mousePressEvent(self, e):
-        self.on_click(self)
+        if e.button() == Qt.LeftButton:
+            self.on_click(self)
 
 
 class DriveList(QWidget):
@@ -255,6 +264,7 @@ class DriveList(QWidget):
         keep = self.current.drive['id'] if self.current else None
         for t in self.tiles:
             t.setParent(None)
+            t.deleteLater()
         self.tiles = []
         self.current = None
         for d in drives:

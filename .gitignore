@@ -10,3 +10,9 @@ dist/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Entorno local de desarrollo
+.venv/
+
+# Capturas de tools/ui_shots.py
+tools/_shots/
