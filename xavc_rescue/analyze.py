@@ -1,8 +1,11 @@
 """Diagnóstico de un clip Sony: estructura, daños y perfil de imagen."""
 import os
+import re
 import struct
 
 from . import mp4, mxf, nal, sonymeta
+
+RTMD_SIGNATURE = b'\x00\x1c\x01\x00'
 
 
 def _zero_ratio(f, start, end, probes=64, block=4096):
@@ -28,6 +31,26 @@ def _data_limit(f, start, end, step=1 << 20):
     return start
 
 
+def _raw_stream(data):
+    """Pistas de que un archivo sin cajas es el mdat de una grabación Sony sin cerrar."""
+    found = []
+    if data[:4] == RTMD_SIGNATURE:
+        found.append('empieza por los metadatos por fotograma de Sony (rtmd)')
+    model = re.search(rb'(ILCE|ILME|ZV|DSC|PXW|FX)-?[0-9A-Z]{1,8}', data[:65536])
+    if model and found:
+        found.append('cámara: %s' % model.group().decode('latin1'))
+    # cada fotograma empieza por un delimitador de acceso (AUD): H.264 «00 00 00 02 09», H.265 «… 03 46 01»
+    for m in re.finditer(rb'\x00\x00\x00\x02\x09|\x00\x00\x00\x03\x46\x01', data[:1 << 20]):
+        start = m.start()
+        det = nal.detect_length_prefixed(data, start, len(data))
+        if det:
+            kind, _cnt, _types = det
+            found.append('vídeo %s a partir del byte %d' % (
+                'H.264 / XAVC S' if kind == nal.AVC else 'H.265 / XAVC HS', start))
+            break
+    return found if len(found) > 1 or (found and 'vídeo' in found[0]) else []
+
+
 def analyze(path):
     lines = []
     size = os.path.getsize(path)
@@ -46,9 +69,21 @@ def analyze(path):
     with open(path, 'rb') as f:
         tops = mp4.scan_top_level(f, size)
         if not tops:
-            lines.append('No se reconoce ninguna estructura MP4/MXF al inicio del archivo.')
-            lines.append('Puede que el inicio esté dañado o que sea un fragmento recuperado.')
-            verdict.append('Prueba "Reparar" con un clip de referencia: busca el vídeo aunque no haya cabeceras.')
+            f.seek(0)
+            peek = f.read(4 << 20)
+            raw = _raw_stream(peek)
+            if raw:
+                lines.append('Grabación sin cabecera ni índice%s: los datos de vídeo empiezan en el byte 0.'
+                             % (' (archivo RSV de Sony)' if path.upper().endswith('.RSV') else ''))
+                lines += ['  ' + x for x in raw]
+                verdict.append('GRABACIÓN INTERRUMPIDA: la cámara no llegó a cerrar el archivo (batería, '
+                               'tarjeta extraída). Los fotogramas están; usa "Reparar" con un clip de '
+                               'referencia grabado con la misma cámara y configuración.')
+            else:
+                lines.append('No se reconoce ninguna estructura MP4/MXF al inicio del archivo.')
+                lines.append('Puede que el inicio esté dañado o que sea un fragmento recuperado.')
+                verdict.append('Prueba "Reparar" con un clip de referencia: busca el vídeo aunque no haya '
+                               'cabeceras.')
         else:
             lines.append('Cajas de primer nivel:')
             for t in tops:

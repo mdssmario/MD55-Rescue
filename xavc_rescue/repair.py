@@ -12,6 +12,7 @@ metadatos en tiempo real (rtmd), y escribir un moov nuevo.
 El flujo de vídeo no se recodifica: los bytes se copian tal cual, así que S-Log3,
 S-Cinetone, HLG, 10 bits 4:2:2, etc. se conservan exactamente.
 """
+import math
 import mmap
 import os
 import struct
@@ -609,12 +610,25 @@ def _ctts_from_poc(t, scanner, chunks, log):
     return ctts
 
 
+def _trim_chunks(chunks, limit):
+    """Los primeros `limit` muestras de una lista de bloques (offset, tamaños)."""
+    out = []
+    for off, smp in chunks:
+        if limit <= 0:
+            break
+        out.append((off, smp[:limit]))
+        limit -= len(out[-1][1])
+    return out
+
+
 def build_moov(ref, scanner, shift, log=print):
     moov = ref.moov.clone()
     traks = [c for c in moov.children if c.type == b'trak']
     movie_ts = ref.movie_timescale
     movie_dur = 0
     stats = {}
+    v = ref.video
+    video_secs = sum(len(smp) for _o, smp in scanner.out.get(v.index) or []) * v.delta / v.timescale
     for t, trak in zip(ref.tracks, traks):
         chunks = scanner.out.get(t.index) or []
         usable = [c for c in chunks if c[1]]
@@ -623,6 +637,10 @@ def build_moov(ref, scanner, shift, log=print):
             if not t.static:
                 log('  pista %d (%s) descartada: no se pudo reconstruir' % (t.index + 1, t.name))
             continue
+        if t.role != 'video':
+            # al cortarse la grabación, audio y metadatos pueden ir algo por delante del vídeo
+            limit = math.ceil(video_secs * t.timescale / t.delta - 1e-9)
+            usable = _trim_chunks(usable, limit)
         sizes = [s for _off, smp in usable for s in smp]
         spc = [len(smp) for _off, smp in usable]
         offsets = [off + shift for off, _smp in usable]

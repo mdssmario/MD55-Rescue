@@ -23,6 +23,8 @@ from .uikit import (ACCENT, BAD, DIM, FAINT, MUTED, OK, VIDEO, WARN, WHITE, Acti
 
 SORT_ROLE = Qt.UserRole + 3
 VIDEO_FILTER = 'Vídeo (*.mp4 *.MP4 *.mov *.MOV)'
+# RSV: el archivo que deja la cámara al cortarse la grabación (sin cabecera ni índice)
+DAMAGED_FILTER = 'Clips dañados (*.mp4 *.MP4 *.mov *.MOV *.rsv *.RSV);;Todos (*)'
 PREVIEW_W, PREVIEW_H = 200, 112
 
 CAMERA_NAMES = {
@@ -1123,7 +1125,8 @@ class RepairPage(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_result)
         drop = EmptyState('repair', 'Arrastra aquí los clips que no abren',
-                          'o usa «Añadir clips…». Se reparan uno tras otro con la misma referencia.')
+                          'MP4 o RSV (el archivo que deja la cámara si se corta la grabación), o usa '
+                          '«Añadir clips…». Se reparan uno tras otro con la misma referencia.')
         drop.setMinimumHeight(200)
         self.list_stack = QStackedWidget()
         self.list_stack.addWidget(drop)
@@ -1179,7 +1182,7 @@ class RepairPage(QWidget):
             self.ref.setText(os.path.normpath(p))
 
     def add_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, 'Clips dañados', '', VIDEO_FILTER)
+        files, _ = QFileDialog.getOpenFileNames(self, 'Clips dañados', '', DAMAGED_FILTER)
         self._add(files)
 
     def _add(self, files):
@@ -1267,7 +1270,8 @@ class AnalyzePage(QWidget):
                                   'Estructura del archivo, si le falta el índice, códec, fps y perfil de '
                                   'imagen (S-Log3, S-Cinetone, HLG…) leído de los metadatos de Sony.'))
         row = QHBoxLayout()
-        self.path = PathRow('Clip MP4 / MXF', mode='file', filter_='Vídeo (*.mp4 *.MP4 *.mxf *.MXF *.mov)')
+        self.path = PathRow('Clip MP4 / MXF / RSV', mode='file',
+                            filter_='Vídeo (*.mp4 *.MP4 *.mxf *.MXF *.mov *.MOV *.rsv *.RSV);;Todos (*)')
         row.addWidget(self.path, 1)
         self.go = QPushButton('Analizar')
         self.go.setObjectName('primary')
