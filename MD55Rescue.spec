@@ -29,7 +29,7 @@ if sys.platform == 'darwin':
         icon=icon_icns if os.path.exists(icon_icns) else icon_png,
         bundle_identifier='com.md55rescue.app',
         info_plist={
-            'CFBundleShortVersionString': '0.2.1',
+            'CFBundleShortVersionString': '0.2.2',
             'NSHighResolutionCapable': True,
             'NSRemovableVolumesUsageDescription':
                 'MD55 Rescue lee la tarjeta de la cámara para recuperar los clips.',
