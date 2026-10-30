@@ -5,8 +5,9 @@ import shutil
 import sys
 import time
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap,
+                           QShortcut)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -18,7 +19,7 @@ from . import __version__, analyze, devices, uikit, worker
 from .carve import PHOTO_KINDS
 from .events import EventReader
 from .uikit import (ACCENT, BAD, DIM, FAINT, MUTED, OK, VIDEO, WARN, WHITE, ActionCard, Disclosure,
-                    DriveList, EmptyState, human_size, plural, section, svg_pixmap, tint)
+                    DriveList, EmptyState, esc, human_size, plural, section, svg_pixmap, tint)
 
 SORT_ROLE = Qt.UserRole + 3
 VIDEO_FILTER = 'Vídeo (*.mp4 *.MP4 *.mov *.MOV)'
@@ -78,9 +79,16 @@ def human_time(s):
     return '%d min %02d s' % (s // 60, s % 60)
 
 
+def settings():
+    """Preferencias simples (tamaño de ventana, última carpeta usada)."""
+    return QSettings('MD55 Rescue', 'MD55 Rescue')
+
+
 def default_output():
-    base = os.path.join(os.path.expanduser('~'), 'Documents', 'MD55 Rescue')
-    return os.path.join(base, time.strftime('Rescate_%Y-%m-%d_%H%M'))
+    """Carpeta propuesta: la última usada (o Documentos) y dentro una con la fecha."""
+    base = settings().value('salida/base') or os.path.join(os.path.expanduser('~'), 'Documents',
+                                                           'MD55 Rescue')
+    return os.path.join(str(base), time.strftime('Rescate_%Y-%m-%d_%H%M'))
 
 
 def open_path(path):
@@ -340,22 +348,61 @@ class PathRow(QWidget):
 
 
 class LogPanel(QWidget):
+    """Registro plegable, con copiar y guardar para adjuntarlo si hay que pedir ayuda."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setMaximumBlockCount(5000)
         self.text.setMinimumHeight(150)
-        lay.addWidget(Disclosure('Registro detallado', self.text), 0, Qt.AlignLeft)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(10)
+        self.toggle = Disclosure('Registro detallado', self.text)
+        head.addWidget(self.toggle)
+        head.addStretch(1)
+        self.copy_btn = QPushButton('Copiar')
+        self.save_btn = QPushButton('Guardar…')
+        for b, tip in ((self.copy_btn, 'Copia el registro al portapapeles'),
+                       (self.save_btn, 'Guarda el registro en un archivo de texto')):
+            b.setObjectName('link')
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setVisible(False)
+            head.addWidget(b)
+        lay.addLayout(head)
         lay.addWidget(self.text)
+        self.copy_btn.clicked.connect(self.copy)
+        self.save_btn.clicked.connect(self.save)
+        self.toggle.toggled.connect(self._show_actions)
 
     def append(self, msg):
         self.text.appendPlainText(msg)
 
     def clear(self):
         self.text.clear()
+
+    def _show_actions(self, on):
+        for b in (self.copy_btn, self.save_btn):
+            b.setVisible(on)
+
+    def copy(self):
+        QApplication.clipboard().setText(self.text.toPlainText())
+
+    def save(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Guardar el registro', 'md55-registro.txt',
+                                              'Texto (*.txt);;Todos (*)')
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self.text.toPlainText())
+        except OSError as e:
+            QMessageBox.warning(self, 'Guardar el registro', 'No se pudo guardar: %s' % e)
 
 
 class ProgressPanel(QWidget):
@@ -513,6 +560,7 @@ class RescuePage(QWidget):
         self.run_sub = QLabel('')
         self.run_sub.setObjectName('subtitle')
         self.run_sub.setWordWrap(True)
+        self.run_sub.setTextFormat(Qt.PlainText)   # los mensajes llevan rutas con < y &
         titles.addWidget(self.run_title)
         titles.addWidget(self.run_sub)
         head.addLayout(titles, 1)
@@ -579,6 +627,23 @@ class RescuePage(QWidget):
         self.table.itemChanged.connect(self._selection_changed)
         lay.addWidget(self.table, 1)
 
+        # aviso cuando un filtro esconde todo, para no confundirlo con una búsqueda sin resultados
+        self.empty_filter = QWidget()
+        fl = QHBoxLayout(self.empty_filter)
+        fl.setContentsMargins(2, 0, 0, 0)
+        fl.setSpacing(10)
+        nobody = QLabel('Ningún archivo coincide con los filtros.')
+        nobody.setObjectName('hint')
+        reset = QPushButton('Quitar filtros')
+        reset.setObjectName('link')
+        reset.setCursor(Qt.PointingHandCursor)
+        reset.clicked.connect(self.reset_filters)
+        fl.addWidget(nobody)
+        fl.addWidget(reset)
+        fl.addStretch(1)
+        self.empty_filter.setVisible(False)
+        lay.addWidget(self.empty_filter)
+
         # vista previa (foto, o la miniatura de la cámara en los vídeos), debajo de la tabla
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignCenter)
@@ -627,6 +692,7 @@ class RescuePage(QWidget):
         self.filter_bar.setVisible(mode in ('scan', 'choose'))
         for wdg in (self.recover_btn, self.sel_label, self.by_date):
             wdg.setVisible(mode in ('scan', 'choose'))
+        self._update_filter_state()
         # ordenar por columnas una vez terminada la exploración (mientras, por orden de hallazgo);
         # por defecto, cronológico
         sortable = mode in ('choose', 'done')
@@ -647,6 +713,7 @@ class RescuePage(QWidget):
         except OSError as e:
             QMessageBox.warning(self, 'Carpeta de salida', str(e))
             return
+        settings().setValue('salida/base', os.path.dirname(self.out_dir) or self.out_dir)
         self.preview_dir = worker.new_events_path() + '_previas'
         args = ['explorar', d['id'], '-o', self.out_dir, '--previas', self.preview_dir]
         if self.ref.text():
@@ -677,6 +744,8 @@ class RescuePage(QWidget):
         self.run_sub.setText('Esperando permiso de Administrador…' if elevate and not devices.is_admin()
                              else 'Preparando…')
         self.stack.setCurrentIndex(1)
+        self.visible_count = 0
+        self.empty_filter.setVisible(False)
         self._set_mode('scan')
         self.t0 = None
         self.job = Job(args, elevate, self)
@@ -808,6 +877,8 @@ class RescuePage(QWidget):
             self.table.setItem(r, c, it)
         self._apply_filter_row(r)
         self.table.blockSignals(False)
+        if not self.table.isRowHidden(r):
+            self.empty_filter.setVisible(False)
         self._selection_changed()
 
     def _refresh_days(self):
@@ -844,7 +915,30 @@ class RescuePage(QWidget):
     def _apply_filter(self, *_):
         for r in range(self.table.rowCount()):
             self._apply_filter_row(r)
+        self._update_filter_state()
         self._selection_changed()
+
+    def _update_filter_state(self, *_):
+        """Cuenta lo visible y avisa si los filtros lo esconden todo."""
+        self.visible_count = sum(1 for r in range(self.table.rowCount())
+                                 if not self.table.isRowHidden(r))
+        show = (self.table.rowCount() > 0 and self.visible_count == 0
+                and getattr(self, 'mode', None) in ('scan', 'choose'))
+        self.empty_filter.setVisible(show)
+        for b in (self.sel_all, self.sel_none):
+            b.setEnabled(self.visible_count > 0)
+
+    def reset_filters(self):
+        """Vuelve a los filtros iniciales para ver todo lo encontrado."""
+        for cb, on in ((self.f_video, True), (self.f_photo, True), (self.f_thumbs, False),
+                       (self.f_incomplete, True)):
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        self.f_date.blockSignals(True)
+        self.f_date.setCurrentIndex(0)
+        self.f_date.blockSignals(False)
+        self._apply_filter()
 
     def _check_visible(self, on):
         self.table.blockSignals(True)
@@ -977,9 +1071,9 @@ class RescuePage(QWidget):
                                  'Este clip no tiene miniatura de la cámara en la tarjeta')
         if not ev.get('complete') and ev.get('note'):
             note = 'Incompleto: %s' % ev['note']
-        self.preview_info.setText(rich(os.path.basename(ev.get('path') or ev.get('name', '')),
-                                       (' · '.join(x for x in details if x), MUTED), ('', None),
-                                       (where, MUTED), (note, DIM)))
+        self.preview_info.setText(rich(esc(os.path.basename(ev.get('path') or ev.get('name', ''))),
+                                       (esc(' · '.join(x for x in details if x)), MUTED),
+                                       ('', None), (esc(where), MUTED), (esc(note), DIM)))
         self.preview_card.setVisible(True)
 
     def _on_finished(self, ok, msg):
@@ -1283,6 +1377,7 @@ class CardToolsPage(QWidget):
         self.status = QLabel('')
         self.status.setObjectName('cardTitle')
         self.status.setWordWrap(True)
+        self.status.setTextFormat(Qt.PlainText)   # los mensajes de error llevan rutas
         self.progress = ProgressPanel()
         stop_row = QHBoxLayout()
         stop_row.addWidget(self.status, 1)
@@ -1409,8 +1504,10 @@ class CardToolsPage(QWidget):
                 '%s usados de %s' % (human_size(used), human_size(c['volsize'])) if used is not None else None)
                 if x)
             self.info.setText(rich('%s &nbsp;%s &nbsp;<span style="color:%s;font-weight:400">%s</span>'
-                                   % (c['id'], c['model'], MUTED, human_size(c['size'] or 0)),
-                                   (line, MUTED), ('<b>Vida útil:</b> %s' % h['conclusion'], '#e6e6e6')))
+                                   % (esc(c['id']), esc(c['model']), MUTED,
+                                      human_size(c['size'] or 0)),
+                                   (esc(line), MUTED),
+                                   ('<b>Vida útil:</b> %s' % esc(h['conclusion']), '#e6e6e6')))
         elif 'veredicto' in data:
             v = data['veredicto']
             text = {'correcta': '✔ Tarjeta correcta', 'falsa': '✖ TARJETA FALSA',
@@ -1487,6 +1584,9 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1200, 820)
         self.setMinimumSize(980, 660)
+        geometry = settings().value('ventana/geometria')
+        if geometry:
+            self.restoreGeometry(geometry)
         central = QWidget()
         lay = QHBoxLayout(central)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1511,8 +1611,12 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName('nav')
         self.nav.setIconSize(QSize(20, 20))
-        for key, label in self.PAGES:
-            self.nav.addItem(QListWidgetItem(uikit.nav_icon(key), '  ' + label))
+        for i, (key, label) in enumerate(self.PAGES):
+            item = QListWidgetItem(uikit.nav_icon(key), '  ' + label)
+            item.setToolTip('%s  ·  Ctrl+%d' % (label, i + 1))
+            self.nav.addItem(item)
+            short = QShortcut(QKeySequence('Ctrl+%d' % (i + 1)), self)
+            short.activated.connect(lambda row=i: self.nav.setCurrentRow(row))
         sl.addWidget(self.nav, 1)
         perm = QLabel(('●  Con permisos de Administrador' if devices.is_admin() else
                        '●  Pedirá permiso al leer la tarjeta'))
@@ -1533,6 +1637,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def closeEvent(self, e):
+        settings().setValue('ventana/geometria', self.saveGeometry())
         # que ningún proceso (p.ej. uno con permisos esperando la selección) quede en marcha
         for i in range(self.pages.count()):
             job = getattr(self.pages.widget(i), 'job', None)
@@ -1552,6 +1657,10 @@ def main():
     app.setApplicationName('MD55 Rescue')
     app.setStyle('Fusion')
     app.setStyleSheet(uikit.stylesheet())
+    try:
+        worker.clean_temp()             # eventos y vistas previas de días anteriores
+    except OSError:
+        pass
     w = MainWindow()
     w.show()
     return app.exec()
