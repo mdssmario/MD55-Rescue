@@ -334,6 +334,16 @@ class Scanner:
                 return False
         return True
 
+    def _tail_fits(self, e, k, frames):
+        """True salvo que el vídeo llegue al final de los datos sin dejar sitio al bloque de
+        audio/metadatos que lo sigue (de tamaño conocido). Se da medio bloque de margen por si
+        el audio termina en silencio (ceros, que no cuentan como datos)."""
+        nxt = self.period[(k + 1) % self.P]
+        if nxt.role == 'video':
+            return True
+        sizes = [s for s in self.candidates(nxt, frames)[:3] if s > 0]
+        return not sizes or e + min(sizes) // 2 <= self.data_limit
+
     def start_ok(self, pos, t):
         if t.role == 'video':
             return self.video_start_ok(pos, t)
@@ -424,16 +434,22 @@ class Scanner:
             cands.append(aus[t.expected_spc][0])
         cands.append(natural)
         cands.extend(ne for (_p, ne, _a, _v) in reversed(nals[-200:-1]))
-        seen = set()
-        for e in cands:
-            if e in seen or e <= pos:
-                continue
-            seen.add(e)
-            frames = sum(1 for a in aus if a[0] < e)
-            if self.chain_ok(e, k + 1, 2, frames=frames):
-                smp = samples_until(e)
-                if smp:
-                    return e, smp, False
+        # en el último bloque no hay un bloque siguiente que marque dónde acaba el vídeo: si el
+        # audio parece NAL válidos, el fotograma final se lo tragaría. Primero se prueban los
+        # finales que dejan sitio al audio de este bloque.
+        for room_for_tail in (True, False):
+            seen = set()
+            for e in cands:
+                if e in seen or e <= pos:
+                    continue
+                seen.add(e)
+                frames = sum(1 for a in aus if a[0] < e)
+                if room_for_tail and not self._tail_fits(e, k, frames):
+                    continue
+                if self.chain_ok(e, k + 1, 2, frames=frames):
+                    smp = samples_until(e)
+                    if smp:
+                        return e, smp, False
         if truncated and len(aus) > 1:
             # el archivo se corta en mitad de este bloque: nos quedamos con
             # los fotogramas completos (el último está a medias)
@@ -718,26 +734,42 @@ def _quick_score(broken_path, ref, probe=64 << 20):
             mm.close()
 
 
-def pick_reference(broken_path, reference, log=print):
-    """Si 'reference' es una carpeta, elige el clip sano que mejor encaja con el dañado."""
-    if not os.path.isdir(reference):
-        return reference
-    best, best_score = None, 0
-    for name in sorted(os.listdir(reference)):
-        path = os.path.join(reference, name)
-        if not name.upper().endswith(('.MP4', '.MOV')) or not os.path.isfile(path):
-            continue
-        if os.path.abspath(path) == os.path.abspath(broken_path):
+def _candidates(reference):
+    """Clips que pueden servir de referencia: uno concreto, los de una carpeta o una lista."""
+    if isinstance(reference, (list, tuple)):
+        return list(reference)
+    if os.path.isdir(reference):
+        return [os.path.join(reference, n) for n in sorted(os.listdir(reference))
+                if n.upper().endswith(('.MP4', '.MOV'))]
+    return [reference]
+
+
+def rank_references(broken_path, reference):
+    """Referencias ordenadas de mejor a peor encaje con el clip dañado: [(puntuación, ruta)].
+    Una puntuación de 1 000 000 o más indica configuración idéntica (mismo SPS)."""
+    ranked = []
+    for path in _candidates(reference):
+        if not os.path.isfile(path) or os.path.abspath(path) == os.path.abspath(broken_path):
             continue
         try:
             score = _quick_score(broken_path, Reference(path, log=lambda m: None))
         except (RepairError, ValueError, OSError, AttributeError, struct.error):
             continue
-        if score > best_score:
-            best, best_score = path, score
-    if best is None:
-        raise RepairError('Ningún clip de la carpeta de referencias encaja con este clip. Graba uno '
-                          'con la misma cámara y configuración.')
+        if score > 0:
+            ranked.append((score, path))
+    ranked.sort(key=lambda x: -x[0])
+    return ranked
+
+
+def pick_reference(broken_path, reference, log=print):
+    """Si 'reference' es una carpeta o una lista, elige el clip sano que mejor encaja con el dañado."""
+    if not isinstance(reference, (list, tuple)) and not os.path.isdir(reference):
+        return reference
+    ranked = rank_references(broken_path, reference)
+    if not ranked:
+        raise RepairError('Ningún clip de referencia encaja con este clip. Graba uno con la misma '
+                          'cámara y configuración.')
+    best_score, best = ranked[0]
     log('Referencia elegida automáticamente: %s%s' % (
         os.path.basename(best), ' (configuración idéntica)' if best_score >= 1_000_000 else ''))
     return best

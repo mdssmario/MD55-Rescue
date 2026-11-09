@@ -25,10 +25,42 @@ jobs:
           python-version: '3.12'
       - name: Dependencias
         run: python -m pip install -r requirements.txt pyinstaller
+      # ffmpeg mínimo y solo LGPL, compilado aquí (una vez por versión del script, luego en caché)
+      - name: ffmpeg (caché)
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: ffmpeg-${{ matrix.os }}-${{ hashFiles('tools/build_ffmpeg.sh') }}
+      - name: Herramientas para compilar ffmpeg (Windows)
+        if: runner.os == 'Windows' && steps.ffcache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm make diffutils tar xz curl
+      - name: Compilar ffmpeg (Windows)
+        if: runner.os == 'Windows' && steps.ffcache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash tools/build_ffmpeg.sh bin
+      - name: Compilar ffmpeg (macOS)
+        if: runner.os == 'macOS' && steps.ffcache.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm
+          bash tools/build_ffmpeg.sh bin
+      - name: Comprobar ffmpeg
+        shell: bash
+        run: |
+          ls -la bin
+          bin/ffmpeg -hide_banner -version | head -1
+          bin/ffmpeg -hide_banner -decoders | grep -E ' (h264|hevc) '
       - name: Iconos (solo genera los que faltan, p.ej. icon.icns en Mac)
         run: python tools/make_icons.py
       - name: Compilar
         run: pyinstaller --noconfirm MD55Rescue.spec
+      - name: Comprobar que ffmpeg va dentro de la aplicación
+        shell: bash
+        run: find dist -path '*bin/ffmpeg*' | grep .
       - name: DMG (macOS)
         if: runner.os == 'macOS'
         run: hdiutil create -volname "MD55 Rescue" -srcfolder "dist/MD55 Rescue.app" -ov -format UDZO "dist/${{ matrix.artifact }}.dmg"

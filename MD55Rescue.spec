@@ -8,10 +8,17 @@ icon_ico = os.path.join('assets', 'icon.ico')
 icon_icns = os.path.join('assets', 'icon.icns')
 icon_png = os.path.join('assets', 'icon.png')
 
+# ffmpeg mínimo LGPL (tools/build_ffmpeg.sh): verificación y vistas previas. Opcional.
+ffmpeg_exe = os.path.join('bin', 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
+ffmpeg_bins = [(ffmpeg_exe, 'bin')] if os.path.exists(ffmpeg_exe) else []
+ffmpeg_docs = [(os.path.join('bin', f), 'bin') for f in ('FFMPEG-LICENSE.txt', 'FFMPEG-README.txt')
+               if ffmpeg_bins and os.path.exists(os.path.join('bin', f))]
+
 a = Analysis(
     ['app_entry.py'],
     pathex=['.'],
-    datas=[(os.path.join('assets', 'logo.png'), 'assets')],
+    binaries=ffmpeg_bins,
+    datas=[(os.path.join('assets', 'logo.png'), 'assets')] + ffmpeg_docs,
     hiddenimports=['xavc_rescue.qtapp', 'xavc_rescue.cli', 'xavc_rescue.gui'],
     excludes=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.Qt3DCore',
               'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtMultimedia', 'PySide6.QtCharts',
@@ -29,7 +36,7 @@ if sys.platform == 'darwin':
         icon=icon_icns if os.path.exists(icon_icns) else icon_png,
         bundle_identifier='com.md55rescue.app',
         info_plist={
-            'CFBundleShortVersionString': '0.2.2',
+            'CFBundleShortVersionString': '0.3.0',
             'NSHighResolutionCapable': True,
             'NSRemovableVolumesUsageDescription':
                 'MD55 Rescue lee la tarjeta de la cámara para recuperar los clips.',

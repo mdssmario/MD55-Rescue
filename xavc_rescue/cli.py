@@ -105,7 +105,8 @@ def _explore_command(args, sink, log, progress, on_clip, should_stop):
                   on_item=(lambda d: sink.event('item', **d)) if sink else None, on_clip=on_clip,
                   compare_dir=args.comparar, reference=args.referencia,
                   start=int(args.desde * 1e9), end=int(args.hasta * 1e9) if args.hasta else None,
-                  kinds=tuple(t.strip() for t in args.tipos.split(',')), preview_dir=args.previas)
+                  kinds=tuple(t.strip() for t in args.tipos.split(',')), preview_dir=args.previas,
+                  on_phase=(lambda name, **d: sink.event('phase', phase=name, **d)) if sink else None)
 
 
 def main(argv=None):
@@ -201,11 +202,15 @@ def main(argv=None):
             out = args.salida or os.path.splitext(args.archivo)[0] + '_REPARADO.MP4'
             res = repair.repair(args.archivo, args.referencia, out, log=log, progress=progress,
                                 force=args.forzar)
-            ffmpeg.verify(out, log=log)
+            errors = ffmpeg.verify(out, log=log)
             if on_clip:
-                from . import clipinfo
+                from . import clipinfo, worker
+                frame = os.path.join(worker.temp_dir(), 'fotograma_%d.jpg' % os.getpid())
                 on_clip(dict(path=out, complete=True, note='reparado', size=os.path.getsize(out),
-                             frames=res['frames'], **clipinfo.summary(out)))
+                             frames=res['frames'], verificado=None if errors is None else not errors,
+                             errores=len(errors or []),
+                             preview=frame if ffmpeg.frame(out, frame) else None,
+                             **clipinfo.summary(out)))
         elif args.cmd == 'rescatar':
             carve.carve(args.origen, args.salida, log=log, progress=progress,
                         reference=args.referencia, compare_dir=args.comparar,

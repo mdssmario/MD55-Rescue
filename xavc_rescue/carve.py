@@ -5,14 +5,16 @@ Reconoce:
   * MP4 / XAVC S / XAVC HS / XAVC S-I  (caja 'ftyp' alineada a sector)
   * MXF / XAVC                          (partition pack de cabecera)
   * XML de metadatos Sony               (<NonRealTimeMeta>, contiene S-Log3/S-Cinetone)
+  * Grabaciones cortadas sin cabecera   (metadatos rtmd alineados: el RSV que deja la cámara)
 """
 import hashlib
 import os
 import re
+import shutil
 import struct
 import sys
 
-from . import clipinfo, mp4, mxf, photos, sonycard
+from . import clipinfo, ffmpeg, mp4, mxf, photos, rawstream, sonycard
 
 PHOTO_KINDS = ('raw', 'heif', 'jpg')
 LONE_HEADER = 1 << 20       # un "clip" de este tamaño o menos es solo una cabecera, sin vídeo
@@ -25,6 +27,12 @@ KNOWN_BRANDS = {b'XAVC', b'mp42', b'mp41', b'isom', b'iso2', b'iso4', b'avc1', b
 MAX_INCOMPLETE = 512 << 30
 # cajas que Sony escribe después del moov (la 'meta' lleva el XML con S-Log3/S-Cinetone)
 TRAILING_BOXES = {b'meta', b'uuid', b'free', b'skip', b'udta'}
+# los datos de un clip empiezan poco después de su cabecera (la A9 III deja ~1,5 MB de hueco)
+DATA_NEAR_HEADER = 4 << 20
+VIDEO_KINDS = ('mp4', 'mxf', 'rsv')
+REF_DIR = '.md55_referencias'   # clips sanos extraídos solo para reparar (se borran al terminar)
+REF_MAX_BYTES = 8 << 30
+REF_TRIES = 3                   # referencias que se prueban por clip si la primera no encaja
 
 
 class Source:
@@ -139,6 +147,12 @@ def _block_hits(data, pos):
         if start >= 0 and start % SECTOR == 0 and 4 <= i < BLOCK + 4 and data[i + 8:i + 12] == b'mvhd':
             hits.append((start, 'moov', ''))
         i = data.find(b'moov', i + 1)
+    i = data.find(rawstream.RTMD_SIGNATURE)
+    while i >= 0:
+        start = pos + i
+        if start % SECTOR == 0 and i < BLOCK and rawstream.is_rtmd(data, i):
+            hits.append((start, 'rsv', ''))
+        i = data.find(rawstream.RTMD_SIGNATURE, i + 1)
     return sorted(hits)
 
 
@@ -268,6 +282,8 @@ def _plan_size(plan):
 def proposed_name(item):
     """Nombre del archivo recuperado: con la fecha de la cámara si se conoce."""
     m = re.match(r'(\d{4})[-:](\d\d)[-:](\d\d)[ T_](\d\d):?(\d\d)', item['info'].get('fecha') or '')
+    if item['kind'] == 'rsv' and not m:
+        return 'GRABACION_CORTADA_%04d.RSV' % item['id']
     suffix = '' if item['complete'] else '_INCOMPLETO'
     if m:
         return '%s-%s-%s_%s-%s_%04d%s.%s' % (m.group(1), m.group(2), m.group(3), m.group(4),
@@ -341,6 +357,32 @@ def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=Non
     def extent(kind, s, limit):
         return (mp4_extent if kind == 'mp4' else mxf_extent)(src, s, limit)
 
+    def raw_stream(s):
+        """Metadatos rtmd alineados: datos de una cabecera reciente o una grabación cortada."""
+        nonlocal covered_until
+        r = rawstream.extent(src, s, min(s + MAX_INCOMPLETE, src.size))
+        if r is None:
+            return
+        owner = next((c for c in reversed(waiting) if c['limit'] is None and not c['paired']
+                      and 0 < s - c['start'] <= DATA_NEAR_HEADER), None)
+        if owner is not None:
+            # son los datos del clip cuya cabecera acaba de aparecer: ya se sabe dónde acaban
+            owner['limit'] = r['end']
+            covered_until = r['end']
+            scanner.skip_to(r['end'])
+            return
+        if r['end'] - s <= LONE_HEADER:
+            return
+        for clip in waiting:
+            if clip['limit'] is None:
+                clip['limit'] = s
+        info = {'codec': rawstream.codec_label(r['kind']), 'camara': r['camara'],
+                'video_kind': r['kind']}
+        emit('rsv', 'rsv', {'type': 'range', 'start': s, 'end': r['end']}, False,
+             'grabación cortada sin cabecera ni índice (%d fotogramas)' % r['frames'], '', info)
+        covered_until = r['end']
+        scanner.skip_to(r['end'])
+
     waiting = []        # cabeceras MP4 cuyo índice está en otra parte de la tarjeta
     orphans = []        # índices (moov) sueltos aún sin pareja
     log('Origen: %s (%.2f GB)' % (src.label, src.size / 1e9))
@@ -364,6 +406,8 @@ def scan(src, kinds=('video', 'foto'), log=print, progress=None, should_stop=Non
                     scanner.skip_to(e)
         elif not want_video:
             continue
+        elif kind == 'rsv':
+            raw_stream(pos)
         elif kind == 'xml':
             if include_xml:
                 data = src.read(pos, 65536)
@@ -488,24 +532,114 @@ class _Verifier:
                                          if tname in self.matched else 'no encontrado'))
 
 
-def _repair_incomplete(saved, reference, log, on_clip):
+def _broken(saved):
+    return [r for r in saved if r['kind'] in ('mp4', 'rsv') and not r['complete']]
+
+
+def _video_kind(info):
+    codec = info.get('video_kind') or info.get('codec') or ''
+    return 'hevc' if 'hevc' in codec or 'HS' in codec else 'avc' if codec else None
+
+
+def card_references(src, items, saved, log, out_dir):
+    """Clips sanos de la propia tarjeta para reparar los incompletos: los ya guardados y, de
+    cada formato que falte, el más pequeño de los encontrados (extraído en una carpeta temporal).
+
+    Devuelve (rutas, carpeta temporal o None)."""
+    broken = _broken(saved)
+    if not broken:
+        return [], None
+    wanted = {_video_kind(r) for r in broken}
+    paths = [r['path'] for r in saved if r['kind'] == 'mp4' and r['complete'] and r.get('path')]
+    have = {(r.get('codec'), r.get('fps')) for r in saved if r['kind'] == 'mp4' and r['complete']}
+    saved_ids = {r['id'] for r in saved}
+    groups = {}
+    for it in items:
+        if it['kind'] != 'mp4' or not it['complete'] or it['id'] in saved_ids:
+            continue
+        kind = _video_kind(it['info'])
+        if None not in wanted and kind is not None and kind not in wanted:
+            continue
+        key = (it['info'].get('codec'), it['info'].get('fps'))
+        if key in have:
+            continue
+        if key not in groups or it['size'] < groups[key]['size']:
+            groups[key] = it
+    tmp = None
+    budget = REF_MAX_BYTES
+    try:
+        budget = min(budget, shutil.disk_usage(out_dir).free - (256 << 20))
+    except OSError:
+        pass
+    for it in sorted(groups.values(), key=lambda it: it['size']):
+        if it['size'] > budget:
+            continue
+        if tmp is None:
+            tmp = os.path.join(out_dir, REF_DIR)
+            os.makedirs(tmp, exist_ok=True)
+        paths.append(extract_item(src, it, tmp))
+        budget -= it['size']
+    if paths:
+        log('Referencias de la propia tarjeta: %d clips sanos.' % len(paths))
+    else:
+        log('En la tarjeta no hay clips sanos que sirvan de referencia.')
+    return paths, tmp
+
+
+def _repaired_name(path):
+    base = os.path.splitext(path)[0]
+    return (base.replace('_INCOMPLETO', '_REPARADO', 1) if '_INCOMPLETO' in base
+            else base + '_REPARADO') + '.MP4'
+
+
+def repair_incomplete(saved, reference, log, on_clip, tries=REF_TRIES):
+    """Repara los clips incompletos y las grabaciones cortadas con la referencia que mejor encaja.
+
+    Con ffmpeg se comprueba que el resultado se decodifica; si no, se prueba la siguiente."""
     from . import repair
-    for r in saved:
-        if r['kind'] == 'mp4' and not r['complete']:
-            base, ext = os.path.splitext(r['path'])
-            out = (base.replace('_INCOMPLETO', '_REPARADO', 1) if '_INCOMPLETO' in base
-                   else base + '_REPARADO') + ext
-            log('')
-            log('Reparando %s ...' % os.path.basename(r['path']))
+    for r in _broken(saved):
+        out = _repaired_name(r['path'])
+        log('')
+        log('Reparando %s ...' % os.path.basename(r['path']))
+        ranked = [p for _s, p in repair.rank_references(r['path'], reference)][:tries]
+        if not ranked:
+            log('  no se pudo reparar: ningún clip de referencia tiene la misma configuración.')
+            continue
+        done = None
+        for i, ref in enumerate(ranked):
+            log('  referencia: %s' % os.path.basename(ref))
             try:
-                ref = repair.pick_reference(r['path'], reference, log)
                 repair.repair(r['path'], ref, out, log=log)
-                r['repaired'] = out
-                if on_clip:
-                    on_clip(dict(r, path=out, complete=True, note='reparado con referencia',
-                                 **clipinfo.summary(out)))
             except repair.RepairError as e:
-                log('  no se pudo reparar: %s' % e)
+                log('  no se pudo con esta referencia: %s' % e)
+                continue
+            errors = ffmpeg.verify(out, log=log, seconds=6)
+            if errors and i + 1 < len(ranked):
+                log('  no encaja (%d errores al decodificar): se prueba otra.' % len(errors))
+                os.remove(out)
+                continue
+            done = (ref, errors)
+            break
+        if done is None:
+            continue
+        ref, errors = done
+        r['repaired'] = out
+        if on_clip:
+            info = clipinfo.summary(out)
+            frame = video_preview(out, r.get('preview_dir'))
+            on_clip(dict(r, path=out, complete=True, note='reparado con referencia',
+                         referencia=os.path.basename(ref),
+                         verificado=None if errors is None else not errors,
+                         preview=frame or r.get('preview'), **info))
+
+
+def video_preview(path, preview_dir):
+    """Fotograma de vista previa de un vídeo recuperado (con ffmpeg). Ruta o None."""
+    if not preview_dir or not ffmpeg.available():
+        return None
+    os.makedirs(preview_dir, exist_ok=True)
+    out = os.path.join(preview_dir, os.path.splitext(os.path.basename(path))[0] + '_fotograma.jpg')
+    return out if ffmpeg.frame(path, out) else None
 
 
 def _public(item, **extra):
@@ -526,10 +660,11 @@ def _check_output(source, out_dir):
 
 def _summary(log, saved):
     log('')
-    log('Listo: %d clips de vídeo, %d fotos, %d incompletos, %d XML de metadatos.' % (
+    log('Listo: %d clips de vídeo, %d fotos, %d incompletos (%d reparados), %d XML de metadatos.' % (
         sum(1 for r in saved if r['complete'] and r['kind'] in ('mp4', 'mxf')),
         sum(1 for r in saved if r['complete'] and r['kind'] in PHOTO_KINDS),
         sum(1 for r in saved if not r['complete']),
+        sum(1 for r in saved if r.get('repaired')),
         sum(1 for r in saved if r['kind'] == 'xml')))
 
 
@@ -562,20 +697,23 @@ def carve(source, out_dir, log=print, progress=None, reference=None, compare_dir
         src.close()
     verifier.report()
     if reference:
-        _repair_incomplete(saved, reference, log, on_clip)
+        repair_incomplete(saved, reference, log, on_clip)
     _summary(log, saved)
     return saved
 
 
 def explore(source, out_dir, wait_selection, log=print, progress=None, should_stop=None,
             on_item=None, on_clip=None, compare_dir=None, reference=None, start=0, end=None,
-            kinds=('video', 'foto'), preview_dir=None):
+            kinds=('video', 'foto'), preview_dir=None, on_phase=None):
     """Explora sin escribir, espera a que el usuario elija y recupera solo lo elegido.
 
-    wait_selection(items) devuelve la lista de ids a recuperar (o None para salir)."""
+    wait_selection(items) devuelve la lista de ids a recuperar (o None para salir). Los clips
+    incompletos y las grabaciones cortadas se reparan con la referencia indicada o, si no hay,
+    con clips sanos de la misma tarjeta. on_phase(nombre, **datos) avisa de cada fase."""
     _check_output(source, out_dir)
     src = Source(source)
     saved = []
+    ref_tmp = None
     try:
         items = scan(src, kinds, log, progress, should_stop, start, end,
                      (lambda it: on_item(_public(it)) if on_item else None), preview_dir)
@@ -605,16 +743,28 @@ def explore(source, out_dir, wait_selection, log=print, progress=None, should_st
                 break
             path = extract_item(src, it, out_dir, step, by_date)
             same = verifier.check(path, it['size'])
-            r = _public(it, path=path, identico_a=same)
+            frame = video_preview(path, preview_dir) if it['kind'] == 'mp4' and it['complete'] else None
+            r = _public(it, path=path, identico_a=same, preview_dir=preview_dir,
+                        **({'preview': frame} if frame else {}))
             saved.append(r)
             log('  guardado %s' % os.path.basename(path))
             if on_clip:
                 on_clip(r)
         verifier.report()
+        if _broken(saved) and not (should_stop and should_stop()):
+            if on_phase:
+                on_phase('repair', count=len(_broken(saved)))
+            if not reference:
+                log('')
+                reference, ref_tmp = card_references(src, items, saved, log, out_dir)
     finally:
         src.close()
-    if reference:
-        _repair_incomplete(saved, reference, log, on_clip)
+    try:
+        if reference and _broken(saved) and not (should_stop and should_stop()):
+            repair_incomplete(saved, reference, log, on_clip)
+    finally:
+        if ref_tmp:
+            shutil.rmtree(ref_tmp, ignore_errors=True)
     _summary(log, saved)
     return saved
 

@@ -16,3 +16,6 @@ Thumbs.db
 
 # Capturas de tools/ui_shots.py
 tools/_shots/
+
+# ffmpeg compilado por tools/build_ffmpeg.sh (se incluye en la aplicación al compilar)
+bin/
