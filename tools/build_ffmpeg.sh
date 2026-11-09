@@ -8,9 +8,17 @@ VERSION=7.1.2
 OUT="$(mkdir -p "${1:-bin}" && cd "${1:-bin}" && pwd)"
 WORK="${TMPDIR:-/tmp}/ffmpeg-build"
 rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
-curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o ffmpeg.tar.xz
-tar xf ffmpeg.tar.xz
-cd "ffmpeg-$VERSION"
+# fuente oficial; si falla (a veces corta la conexión), la copia del mismo código en GitHub
+mkdir src
+if curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+        "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o ffmpeg.tar.xz; then
+  tar xf ffmpeg.tar.xz -C src --strip-components=1
+else
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+       "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$VERSION.tar.gz" -o ffmpeg.tar.gz
+  tar xzf ffmpeg.tar.gz -C src --strip-components=1
+fi
+cd src
 
 FLAGS=(
   --disable-everything --disable-autodetect --disable-network --disable-doc --disable-debug
