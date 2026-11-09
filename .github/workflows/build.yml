@@ -37,6 +37,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
+          release: false        # usa el MSYS2 que ya trae la máquina (sin descargarlo)
           install: >-
             mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm make diffutils tar xz curl
       - name: Compilar ffmpeg (Windows)
