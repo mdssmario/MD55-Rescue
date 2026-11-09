@@ -13,7 +13,7 @@ jobs:
         include:
           - os: windows-latest
             artifact: MD55-Rescue-windows
-          - os: macos-14
+          - os: macos-15
             artifact: MD55-Rescue-mac-arm64
           - os: macos-15-intel
             artifact: MD55-Rescue-mac-x86_64
@@ -36,9 +36,9 @@ jobs:
         if: runner.os == 'Windows' && steps.ffcache.outputs.cache-hit != 'true'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           install: >-
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm make diffutils tar xz curl
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm make diffutils tar xz curl
       - name: Compilar ffmpeg (Windows)
         if: runner.os == 'Windows' && steps.ffcache.outputs.cache-hit != 'true'
         shell: msys2 {0}
