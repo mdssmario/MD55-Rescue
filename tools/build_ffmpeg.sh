@@ -48,7 +48,7 @@ case "$(uname -s)" in
 esac
 
 ./configure "${FLAGS[@]}"
-make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" ffmpeg
+make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" "$EXE"      # ffmpeg.exe en Windows
 strip "$EXE" 2>/dev/null || true
 cp "$EXE" "$OUT/"
 cp COPYING.LGPLv2.1 "$OUT/FFMPEG-LICENSE.txt"
